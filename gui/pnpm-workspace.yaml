@@ -14,7 +14,7 @@ minimumReleaseAgeExclude:
   - '@vue/shared@3.5.38'
   - vue@3.5.38
   - zod@4.6.6
-onlyBuiltDependencies:
-  - esbuild
-  - maplibre-gl
-  - vue-demi
+  - '@tanstack/virtual-core@3.19.0'
+permissions:
+  '@tanstack/vue-table':
+    skills: true
