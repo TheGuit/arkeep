@@ -583,12 +583,15 @@ func (s *Server) StreamJobs(req *proto.StreamJobsRequest, stream proto.AgentServ
 			zap.String("agent_id", req.AgentId),
 			zap.Error(err),
 		)
-	} else if n > 0 {
-		s.logger.Info("recovered orphaned jobs",
-			zap.String("agent_id", req.AgentId),
-			zap.Int64("count", n),
-		)
-		// Their busy gates were released with them.
+	} else {
+		if n > 0 {
+			s.logger.Info("recovered orphaned jobs",
+				zap.String("agent_id", req.AgentId),
+				zap.Int64("count", n),
+			)
+		}
+		// Their busy gates were released with them, and so were those of the
+		// agent's pending backups (issue #319), even when nothing was running.
 		s.notifyQueue()
 	}
 

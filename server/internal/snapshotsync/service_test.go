@@ -348,8 +348,15 @@ func TestSyncDestination(t *testing.T) {
 		e.attachPolicy(t, e.agent, dest, "")
 		e.lister.connected[e.agent.ID.String()] = true
 		e.createSnapshot(t, dest, "pruned", old)
-		if err := e.gdb.Model(&db.Destination{}).Where("id = ?", dest.ID).Update("busy_job_id", uuid.New()).Error; err != nil {
-			t.Fatalf("mark destination busy: %v", err)
+		// A running backup holds it shared: syncing now could record that
+		// backup's snapshot as an imported one before the backup reports it.
+		ctx := context.Background()
+		backup := &db.Job{AgentID: e.agent.ID, Type: "backup", Status: "running"}
+		if err := repositories.NewJobRepository(e.gdb).Create(ctx, backup); err != nil {
+			t.Fatalf("create backup job: %v", err)
+		}
+		if ok, err := repositories.NewDestinationRepository(e.gdb).TryAcquireBusyAll(ctx, []uuid.UUID{dest.ID}, backup.ID, db.LockShared); err != nil || !ok {
+			t.Fatalf("lock destination: %v %v", ok, err)
 		}
 
 		_, err := e.svc.SyncDestination(context.Background(), dest.ID)

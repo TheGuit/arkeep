@@ -185,7 +185,7 @@ func TestTryAcquireBusy_SecondCallFails(t *testing.T) {
 		}
 	}
 
-	acquired, err := destRepo.TryAcquireBusy(ctx, dest.ID, jobA.ID)
+	acquired, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{dest.ID}, jobA.ID, db.LockExclusive)
 	if err != nil {
 		t.Fatalf("TryAcquireBusy (jobA): %v", err)
 	}
@@ -193,7 +193,7 @@ func TestTryAcquireBusy_SecondCallFails(t *testing.T) {
 		t.Fatal("TryAcquireBusy (jobA) = false, want true (destination was free)")
 	}
 
-	acquired, err = destRepo.TryAcquireBusy(ctx, dest.ID, jobB.ID)
+	acquired, err = destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{dest.ID}, jobB.ID, db.LockExclusive)
 	if err != nil {
 		t.Fatalf("TryAcquireBusy (jobB): %v", err)
 	}
@@ -203,7 +203,7 @@ func TestTryAcquireBusy_SecondCallFails(t *testing.T) {
 
 	// Idempotent for the same job — a retried dispatch must not treat its own
 	// hold as contention.
-	acquired, err = destRepo.TryAcquireBusy(ctx, dest.ID, jobA.ID)
+	acquired, err = destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{dest.ID}, jobA.ID, db.LockExclusive)
 	if err != nil {
 		t.Fatalf("TryAcquireBusy (jobA again): %v", err)
 	}
@@ -215,7 +215,7 @@ func TestTryAcquireBusy_SecondCallFails(t *testing.T) {
 	if err := destRepo.ReleaseBusy(ctx, dest.ID, jobA.ID); err != nil {
 		t.Fatalf("ReleaseBusy: %v", err)
 	}
-	acquired, err = destRepo.TryAcquireBusy(ctx, dest.ID, jobB.ID)
+	acquired, err = destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{dest.ID}, jobB.ID, db.LockExclusive)
 	if err != nil {
 		t.Fatalf("TryAcquireBusy (jobB after release): %v", err)
 	}
@@ -244,7 +244,7 @@ func TestReleaseBusy_WrongJobIDNoop(t *testing.T) {
 		}
 	}
 
-	if acquired, err := destRepo.TryAcquireBusy(ctx, dest.ID, jobA.ID); err != nil || !acquired {
+	if acquired, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{dest.ID}, jobA.ID, db.LockExclusive); err != nil || !acquired {
 		t.Fatalf("TryAcquireBusy (jobA): acquired=%v err=%v", acquired, err)
 	}
 
@@ -252,7 +252,7 @@ func TestReleaseBusy_WrongJobIDNoop(t *testing.T) {
 	if err := destRepo.ReleaseBusy(ctx, dest.ID, jobB.ID); err != nil {
 		t.Fatalf("ReleaseBusy (wrong job): %v", err)
 	}
-	acquired, err := destRepo.TryAcquireBusy(ctx, dest.ID, jobB.ID)
+	acquired, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{dest.ID}, jobB.ID, db.LockExclusive)
 	if err != nil {
 		t.Fatalf("TryAcquireBusy (jobB): %v", err)
 	}
@@ -283,10 +283,10 @@ func TestReleaseBusyForJobs(t *testing.T) {
 			t.Fatalf("create job: %v", err)
 		}
 	}
-	if acquired, err := destRepo.TryAcquireBusy(ctx, d1.ID, j1.ID); err != nil || !acquired {
+	if acquired, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{d1.ID}, j1.ID, db.LockExclusive); err != nil || !acquired {
 		t.Fatalf("TryAcquireBusy d1/j1: acquired=%v err=%v", acquired, err)
 	}
-	if acquired, err := destRepo.TryAcquireBusy(ctx, d2.ID, j2.ID); err != nil || !acquired {
+	if acquired, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{d2.ID}, j2.ID, db.LockExclusive); err != nil || !acquired {
 		t.Fatalf("TryAcquireBusy d2/j2: acquired=%v err=%v", acquired, err)
 	}
 
@@ -295,12 +295,8 @@ func TestReleaseBusyForJobs(t *testing.T) {
 	}
 
 	for _, d := range []*db.Destination{d1, d2} {
-		got, err := destRepo.GetByID(ctx, d.ID)
-		if err != nil {
-			t.Fatalf("GetByID %s: %v", d.Name, err)
-		}
-		if got.BusyJobID != nil {
-			t.Errorf("destination %q BusyJobID = %v, want nil after ReleaseBusyForJobs", d.Name, got.BusyJobID)
+		if got := busyHolder(t, destRepo, d.ID); got != "" {
+			t.Errorf("destination %q holder = %q, want none after ReleaseBusyForJobs", d.Name, got)
 		}
 	}
 }

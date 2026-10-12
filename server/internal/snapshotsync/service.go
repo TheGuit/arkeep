@@ -72,6 +72,7 @@ type destinationStore interface {
 	List(ctx context.Context, opts repositories.ListOptions) ([]db.Destination, int64, error)
 	ListPoliciesByDestination(ctx context.Context, destinationID uuid.UUID) ([]db.Policy, error)
 	UpdateRepoSize(ctx context.Context, id uuid.UUID, sizeBytes int64, at time.Time) error
+	ListLocks(ctx context.Context, destinationIDs []uuid.UUID) ([]db.DestinationLock, error)
 }
 
 // snapshotStore is the subset of the snapshot repository the service needs.
@@ -177,7 +178,12 @@ func (s *Service) SyncDestination(ctx context.Context, destID uuid.UUID) (Result
 	if err != nil {
 		return Result{}, err
 	}
-	if dest.BusyJobID != nil {
+	// Any hold counts, a backup's shared one included: see ErrDestinationBusy.
+	locks, err := s.dests.ListLocks(ctx, []uuid.UUID{dest.ID})
+	if err != nil {
+		return Result{}, fmt.Errorf("failed to load destination locks: %w", err)
+	}
+	if len(locks) > 0 {
 		return Result{}, ErrDestinationBusy
 	}
 

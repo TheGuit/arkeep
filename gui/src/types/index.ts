@@ -203,11 +203,17 @@ export interface Destination {
   // the "already used by N other policies" notice in the policy editor's
   // destination picker.
   policy_count: number
-  // busy_job_id: the backup or retention job currently holding this
-  // destination's repository ("" when free); busy_since: when it took it.
-  // Explains why a backup to this destination was skipped.
-  busy_job_id: string
-  busy_since: string
+  // locks: the jobs holding this destination's repository, oldest first,
+  // empty when free (issue #319). Backups share it; a retention sweep or
+  // integrity check holds it alone. Explains why a job here is waiting.
+  locks: DestinationLock[]
+}
+
+// One job's hold on a destination's repository.
+export interface DestinationLock {
+  job_id: string
+  mode: 'shared' | 'exclusive'
+  since: string // RFC3339
 }
 
 // structure: repository metadata only; subset: plus a share of the pack data;

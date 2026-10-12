@@ -423,7 +423,7 @@ func (q *queueFixture) holder(d *db.Destination) *db.Job {
 	if err := q.jobs.Create(ctx, h); err != nil {
 		q.t.Fatalf("create holder job: %v", err)
 	}
-	if acquired, err := q.s.dests.TryAcquireBusy(ctx, d.ID, h.ID); err != nil || !acquired {
+	if acquired, err := q.s.dests.TryAcquireBusyAll(ctx, []uuid.UUID{d.ID}, h.ID, db.LockExclusive); err != nil || !acquired {
 		q.t.Fatalf("TryAcquireBusy: acquired=%v err=%v", acquired, err)
 	}
 	return h
@@ -433,10 +433,16 @@ func (q *queueFixture) holder(d *db.Destination) *db.Job {
 // dispatches the job like a fresh run.
 func (q *queueFixture) dispatch(dests ...*db.Destination) *db.Job {
 	q.t.Helper()
+	return q.dispatchAs(q.f.agentID, dests...)
+}
+
+// dispatchAs is dispatch for a policy of agentID.
+func (q *queueFixture) dispatchAs(agentID uuid.UUID, dests ...*db.Destination) *db.Job {
+	q.t.Helper()
 	ctx := context.Background()
 	policy := &db.Policy{
 		Name:         "policy-" + uuid.Must(uuid.NewV7()).String(),
-		AgentID:      q.f.agentID,
+		AgentID:      agentID,
 		Schedule:     "0 2 * * *",
 		Enabled:      true,
 		Sources:      `[{"type":"directory","path":"/data"}]`,
@@ -445,7 +451,7 @@ func (q *queueFixture) dispatch(dests ...*db.Destination) *db.Job {
 	if err := q.s.policies.Create(ctx, policy); err != nil {
 		q.t.Fatalf("create policy: %v", err)
 	}
-	job := &db.Job{PolicyID: &policy.ID, AgentID: q.f.agentID, Type: "backup", Status: "pending"}
+	job := &db.Job{PolicyID: &policy.ID, AgentID: agentID, Type: "backup", Status: "pending"}
 	if err := q.jobs.Create(ctx, job); err != nil {
 		q.t.Fatalf("create job: %v", err)
 	}
@@ -465,6 +471,17 @@ func (q *queueFixture) dispatch(dests ...*db.Destination) *db.Job {
 	return job
 }
 
+// agent creates a second agent with a live stream.
+func (q *queueFixture) agent(name string) uuid.UUID {
+	q.t.Helper()
+	a := &db.Agent{Name: name, Status: "online", Labels: "{}"}
+	if err := repositories.NewAgentRepository(q.gdb).Create(context.Background(), a); err != nil {
+		q.t.Fatalf("create agent: %v", err)
+	}
+	q.s.agentMgr.Register(a.ID.String(), name, false, &recordingStream{})
+	return a.ID
+}
+
 func (q *queueFixture) status(job *db.Job) string {
 	q.t.Helper()
 	stored, err := q.jobs.GetByID(context.Background(), job.ID)
@@ -474,13 +491,18 @@ func (q *queueFixture) status(job *db.Job) string {
 	return stored.Status
 }
 
-func (q *queueFixture) busyHolder(d *db.Destination) *uuid.UUID {
+// holders returns the IDs of the jobs holding d, oldest first.
+func (q *queueFixture) holders(d *db.Destination) []uuid.UUID {
 	q.t.Helper()
-	got, err := q.s.dests.GetByID(context.Background(), d.ID)
+	locks, err := q.s.dests.ListLocks(context.Background(), []uuid.UUID{d.ID})
 	if err != nil {
-		q.t.Fatalf("GetByID: %v", err)
+		q.t.Fatalf("ListLocks: %v", err)
 	}
-	return got.BusyJobID
+	ids := make([]uuid.UUID, len(locks))
+	for i, l := range locks {
+		ids[i] = l.JobID
+	}
+	return ids
 }
 
 func (q *queueFixture) finish(job *db.Job) {
@@ -511,8 +533,8 @@ func TestDispatch_DestinationBusy_Queues(t *testing.T) {
 	if notif.jobFailed != 0 {
 		t.Errorf("NotifyJobFailed called %d times, want 0: waiting is not a failure", notif.jobFailed)
 	}
-	if h := q.busyHolder(dest); h == nil || *h != holder.ID {
-		t.Errorf("BusyJobID = %v, want the holder %s", h, holder.ID)
+	if h := q.holders(dest); len(h) != 1 || h[0] != holder.ID {
+		t.Errorf("holders = %v, want only the holder %s", h, holder.ID)
 	}
 
 	q.finish(holder)
@@ -524,8 +546,8 @@ func TestDispatch_DestinationBusy_Queues(t *testing.T) {
 	if sent := q.stream.sent(); len(sent) != 1 || sent[0] != proto.JobType_JOB_TYPE_BACKUP {
 		t.Errorf("agent was sent %v, want exactly one backup", sent)
 	}
-	if h := q.busyHolder(dest); h == nil || *h != job.ID {
-		t.Errorf("BusyJobID = %v, want the started job %s", h, job.ID)
+	if h := q.holders(dest); len(h) != 1 || h[0] != job.ID {
+		t.Errorf("holders = %v, want only the started job %s", h, job.ID)
 	}
 }
 
@@ -543,44 +565,38 @@ func TestDispatch_PartiallyBusy_ClaimsNothing(t *testing.T) {
 	if got := q.status(job); got != "waiting" {
 		t.Fatalf("job status = %q, want \"waiting\"", got)
 	}
-	if h := q.busyHolder(free); h != nil {
-		t.Errorf("free destination BusyJobID = %v, want nil: a waiting job must hold nothing", h)
+	if h := q.holders(free); len(h) != 0 {
+		t.Errorf("free destination holders = %v, want none: a waiting job must hold nothing", h)
 	}
 }
 
-// TestDispatch_StrictFIFO: a younger job must not overtake an older waiting
-// job on a destination they share, even while that destination is free —
-// otherwise a job needing several destinations could starve.
-func TestDispatch_StrictFIFO(t *testing.T) {
+// TestDispatch_BackupNextToWaitingBackup: backups hold their destinations
+// shared (issue #319), so a backup waiting for a destination another one
+// holds exclusively does not hold up a younger backup on a destination they
+// share — the queue stays FIFO only between conflicting modes.
+func TestDispatch_BackupNextToWaitingBackup(t *testing.T) {
 	q := newQueueFixture(t)
 	a := q.dest("a")
 	b := q.dest("b")
 	holderA := q.holder(a)
 
 	older := q.dispatch(a, b) // waits for a
-	younger := q.dispatch(b)  // b is free, but older is waiting for it
+	younger := q.dispatch(b)  // b is free and older only wants it shared
 
-	if got := q.status(younger); got != "waiting" {
-		t.Fatalf("younger job status = %q, want \"waiting\" behind the older one", got)
+	if got := q.status(older); got != "waiting" {
+		t.Fatalf("older job status = %q, want \"waiting\" for a", got)
 	}
-	q.s.queue.Drain(context.Background())
-	if got := q.status(younger); got != "waiting" {
-		t.Fatalf("younger job status after drain = %q, want still \"waiting\"", got)
+	if got := q.status(younger); got != "pending" {
+		t.Fatalf("younger job status = %q, want \"pending\" (started next to the waiting backup)", got)
 	}
 
 	q.finish(holderA)
 	q.s.queue.Drain(context.Background())
 	if got := q.status(older); got != "pending" {
-		t.Fatalf("older job status = %q, want \"pending\" (started first)", got)
+		t.Errorf("older job status = %q, want \"pending\" once a is free, while younger still holds b", got)
 	}
-	if got := q.status(younger); got != "waiting" {
-		t.Fatalf("younger job status = %q, want \"waiting\" while the older one holds b", got)
-	}
-
-	q.finish(older)
-	q.s.queue.Drain(context.Background())
-	if got := q.status(younger); got != "pending" {
-		t.Errorf("younger job status = %q, want \"pending\" once b is free", got)
+	if h := q.holders(b); len(h) != 2 {
+		t.Errorf("b holders = %v, want both backups", h)
 	}
 }
 
@@ -664,6 +680,36 @@ func TestTriggerNow_AlreadyQueued(t *testing.T) {
 	if _, err := q.s.TriggerNow(ctx, q.f.policy.ID); !errors.Is(err, ErrJobAlreadyQueued) {
 		t.Errorf("second TriggerNow error = %v, want ErrJobAlreadyQueued", err)
 	}
+}
+
+// TestDispatch_AgentGoneBeforeRunning_FreesDestination is the regression case
+// for issue #319: a backup sent to an agent that vanishes before reporting
+// "running" stays pending, and must not keep its destination busy — a backup of
+// another agent on the same destination would otherwise wait until the gone
+// agent came back or the job was cancelled by hand.
+func TestDispatch_AgentGoneBeforeRunning_FreesDestination(t *testing.T) {
+	q := newQueueFixture(t)
+	ctx := context.Background()
+	dest := q.dest("shared")
+
+	stranded := q.dispatch(dest)
+	if got := q.status(stranded); got != "pending" {
+		t.Fatalf("job status = %q, want \"pending\" (sent to the agent)", got)
+	}
+
+	// The agent drops: the disconnect cleanup of the gRPC server and watchdog.
+	q.s.agentMgr.DeregisterStale(q.f.agentID.String(), time.Now().Add(time.Second))
+	if _, err := q.jobs.MarkRunningJobsInterruptedForAgent(ctx, q.f.agentID, "agent disconnected"); err != nil {
+		t.Fatalf("MarkRunningJobsInterruptedForAgent: %v", err)
+	}
+	if got := q.status(stranded); got != "pending" {
+		t.Errorf("stranded job status = %q, want \"pending\" for DispatchPending", got)
+	}
+
+	other := q.dispatchAs(q.agent("other-agent"), dest)
+	if got := q.status(other); got != "pending" {
+		t.Errorf("other agent's job status = %q, want \"pending\" (sent, not queued behind the gone agent)", got)
+  }
 }
 
 // TestScheduledRunAdvancesNextRunAt covers issue #321: after a scheduled run the
