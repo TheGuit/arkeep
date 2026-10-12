@@ -9,11 +9,19 @@ import (
 	"time"
 )
 
+// latestReleaseURL is the GitHub API endpoint queried for the latest release.
+const latestReleaseURL = "https://api.github.com/repos/arkeep-io/arkeep/releases/latest"
+
 type versionHandler struct {
 	serverVersion string
-	mu            sync.RWMutex
-	cachedLatest  string
-	cachedAt      time.Time
+	// updateCheck enables the GitHub lookup. When false the handler never
+	// leaves the server and reports serverVersion as the latest version.
+	updateCheck bool
+	// releasesURL is latestReleaseURL, overridable in tests.
+	releasesURL  string
+	mu           sync.RWMutex
+	cachedLatest string
+	cachedAt     time.Time
 }
 
 type versionResponse struct {
@@ -22,14 +30,19 @@ type versionResponse struct {
 	UpdateAvailable bool   `json:"update_available"`
 }
 
-func newVersionHandler(serverVersion string) *versionHandler {
-	return &versionHandler{serverVersion: serverVersion}
+func newVersionHandler(serverVersion string, updateCheck bool) *versionHandler {
+	return &versionHandler{
+		serverVersion: serverVersion,
+		updateCheck:   updateCheck,
+		releasesURL:   latestReleaseURL,
+	}
 }
 
 // Get handles GET /api/v1/version.
 // Returns the running server version, the latest published release, and whether
 // an update is available. The latest version is fetched from the GitHub releases
-// API and cached for one hour to avoid rate-limiting.
+// API and cached for one hour to avoid rate-limiting. With the update check
+// disabled (ARKEEP_UPDATE_CHECK=false) GitHub is never contacted.
 func (h *versionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	latest := h.getLatest()
 	updateAvailable := compareServerVersions(h.serverVersion, latest) < 0
@@ -43,6 +56,10 @@ func (h *versionHandler) Get(w http.ResponseWriter, r *http.Request) {
 // getLatest returns the cached latest version string, refreshing from GitHub
 // if the cache is empty or older than one hour.
 func (h *versionHandler) getLatest() string {
+	if !h.updateCheck {
+		return h.serverVersion
+	}
+
 	h.mu.RLock()
 	if h.cachedLatest != "" && time.Since(h.cachedAt) < time.Hour {
 		v := h.cachedLatest
@@ -66,8 +83,7 @@ func (h *versionHandler) getLatest() string {
 // always false rather than returning a misleading result.
 func (h *versionHandler) fetchFromGitHub() string {
 	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodGet,
-		"https://api.github.com/repos/arkeep-io/arkeep/releases/latest", nil)
+	req, err := http.NewRequest(http.MethodGet, h.releasesURL, nil)
 	if err != nil {
 		return h.serverVersion
 	}

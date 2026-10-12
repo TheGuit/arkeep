@@ -103,6 +103,10 @@ type RouterConfig struct {
 	// and check for updates.
 	ServerVersion string
 
+	// UpdateCheck enables the GitHub lookup behind GET /api/v1/version that
+	// reports whether a newer release exists.
+	UpdateCheck bool
+
 	// Metrics is the Prometheus metrics collector used to instrument HTTP
 	// requests. Optional — if nil, HTTP metrics are not recorded.
 	Metrics *metrics.Metrics
@@ -145,7 +149,7 @@ func NewRouter(cfg RouterConfig) *chi.Mux {
 	settingsHandler := NewSettingsHandler(cfg.OIDCProviders, cfg.Settings, cfg.Audit, cfg.LogRetention, cfg.Logger)
 	wsHandler := NewWSHandler(cfg.Hub, cfg.AuthService, cfg.Logger)
 	dashboardHandler := NewDashboardHandler(cfg.Dashboard, cfg.Logger)
-	versionHandler := newVersionHandler(cfg.ServerVersion)
+	versionHandler := newVersionHandler(cfg.ServerVersion, cfg.UpdateCheck)
 	auditHandler := NewAuditHandler(cfg.Audit, cfg.Logger)
 
 	healthHandler := newHealthHandler(cfg.DB, cfg.Scheduler)

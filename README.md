@@ -383,6 +383,7 @@ precedence over environment variables when both are provided.
 | `--trusted-proxies` | `ARKEEP_TRUSTED_PROXIES` | *(loopback and private networks)* | Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` is trusted for the client address, used by login rate limits and the audit log. `none` trusts no proxy. Narrow it to your proxy's address if clients can reach the server directly from a private network. |
 | `--metrics-token` | `ARKEEP_METRICS_TOKEN` | *(empty)* | When set, `/metrics` requires `Authorization: Bearer <token>` (Prometheus `authorization` / `bearer_token` scrape option). When empty, `/metrics` is public. |
 | `--telemetry` | `ARKEEP_TELEMETRY` | `true` | Send anonymous usage stats (opt-out) |
+| `--update-check` | `ARKEEP_UPDATE_CHECK` | `true` | Query the GitHub releases API (`api.github.com`, cached 1 h) to show an update indicator in the GUI. Set to `false` to never contact GitHub, e.g. for air-gapped or egress-restricted installs. |
 | `--grpc-insecure` | `ARKEEP_GRPC_INSECURE` | `false` | Disable TLS for gRPC transport — development and same-machine deployments only |
 
 **Generating secrets:**
