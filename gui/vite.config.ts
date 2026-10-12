@@ -20,36 +20,15 @@ export default defineConfig({
         // via the content hash in each filename.
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
 
-        // ── Runtime caching ─────────────────────────────────────────────────
-        // API responses are deliberately not cached: they are live state
-        // (job progress, agent status) that would mislead when stale, and
-        // authenticated data that should not persist in the browser.
-        runtimeCaching: [
-          {
-            // External fonts and stylesheets — cache first, long TTL.
-            // fetchOptions: cors ensures the SW never caches an opaque response
-            // (status 0) that lacks CORS headers, which would cause the browser
-            // to reject the cached font on subsequent requests.
-            urlPattern: /^https:\/\/fonts\.(googleapis|gstatic)\.com\//,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'google-fonts',
-              fetchOptions: { mode: 'cors' },
-              cacheableResponse: { statuses: [200] },
-              expiration: {
-                maxEntries: 20,
-                maxAgeSeconds: 365 * 24 * 60 * 60,
-              },
-            },
-          },
-        ],
-
         // ── SPA fallback ────────────────────────────────────────────────────
         // Unmatched navigation requests (client-side routes) fall back to
         // index.html so Vue Router can handle them offline.
         navigateFallback: '/index.html',
         navigateFallbackDenylist: [
-          // Never intercept API calls, WebSocket upgrades, or server-side auth routes
+          // Never intercept API calls, WebSocket upgrades, or server-side auth
+          // routes. There is no runtime caching either: API responses are live
+          // state (job progress, agent status) that would mislead when stale,
+          // and authenticated data that should not persist in the browser.
           /^\/api\//,
           /^\/auth\/oidc\//,
         ],

@@ -21,6 +21,14 @@ import { router } from './router'
 // so the page reloads cleanly the moment the new SW takes over.
 registerSW({ immediate: true })
 
+// Fonts used to come from Google Fonts through a CacheFirst runtime route
+// with its own named cache. Workbox only cleans up outdated precaches, never
+// runtime caches, so browsers that ran the old SW would keep that cache
+// forever. Drop it; this is a no-op once it is gone.
+if ('caches' in window) {
+  caches.delete('google-fonts').catch(() => {})
+}
+
 const pinia = createPinia()
 const app = createApp(App)
 
