@@ -58,6 +58,7 @@ type config struct {
 	baseURL       string
 	secureCookies bool
 	telemetry     bool
+	updateCheck   bool
 	grpcInsecure  bool
 	// trustedProxies is ARKEEP_TRUSTED_PROXIES (see api.ParseTrustedProxies).
 	trustedProxies string
@@ -101,6 +102,7 @@ and manages scheduling, policies, and notifications.`,
 	root.PersistentFlags().StringVar(&cfg.baseURL, "base-url", envOrDefault("ARKEEP_BASE_URL", ""), "External base URL of the server (e.g. https://arkeep.example.com); used for links in outbound email. Required for self-service password reset emails (disabled when unset)")
 	root.PersistentFlags().BoolVar(&cfg.secureCookies, "secure-cookies", envOrDefault("ARKEEP_SECURE_COOKIES", "false") == "true", "Set Secure flag on auth cookies (enable in production over HTTPS)")
 	root.PersistentFlags().BoolVar(&cfg.telemetry, "telemetry", envOrDefault("ARKEEP_TELEMETRY", "true") != "false", "Send anonymous usage stats (opt-out)")
+	root.PersistentFlags().BoolVar(&cfg.updateCheck, "update-check", envOrDefault("ARKEEP_UPDATE_CHECK", "true") != "false", "Check GitHub for new Arkeep releases (set to false to never contact api.github.com)")
 	root.PersistentFlags().StringVar(&cfg.trustedProxies, "trusted-proxies", envOrDefault("ARKEEP_TRUSTED_PROXIES", ""), "Comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-For is trusted for the client address (default: loopback and private networks; \"none\" to trust none)")
 	root.PersistentFlags().StringVar(&cfg.metricsToken, "metrics-token", envOrDefault("ARKEEP_METRICS_TOKEN", ""), "Bearer token required to read /metrics (unset: /metrics is public)")
 	root.PersistentFlags().BoolVar(&cfg.grpcInsecure, "grpc-insecure", envOrDefault("ARKEEP_GRPC_INSECURE", "false") == "true", "Disable TLS for gRPC transport (development only — never use in production)")
@@ -481,6 +483,7 @@ func run(ctx context.Context, cfg *config) error {
 		AutoCerts:          autoCerts,
 		AgentSecret:        cfg.agentSecret,
 		ServerVersion:      version,
+		UpdateCheck:        cfg.updateCheck,
 	})
 	api.MountGUI(router, guiFS())
 

@@ -58,6 +58,8 @@ spec:
             {{- end }}
             - name: ARKEEP_SECURE_COOKIES
               value: {{ .Values.config.secureCookies | quote }}
+            - name: ARKEEP_UPDATE_CHECK
+              value: {{ .Values.config.updateCheck | quote }}
             - name: ARKEEP_DATA_DIR
               value: {{ printf "%s/data" .Values.persistence.mountPath | quote }}
 
