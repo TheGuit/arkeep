@@ -116,7 +116,9 @@ func policyToResponse(p *db.Policy, destinations []repositories.PolicyDestinatio
 		s := p.LastRunAt.UTC().Format(time.RFC3339)
 		resp.LastRunAt = &s
 	}
-	if p.NextRunAt != nil {
+	// A disabled policy has no next run, whatever was stored before it was
+	// disabled (issue #321).
+	if p.Enabled && p.NextRunAt != nil {
 		s := p.NextRunAt.UTC().Format(time.RFC3339)
 		resp.NextRunAt = &s
 	}

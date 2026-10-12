@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -91,6 +92,43 @@ func TestPolicyHandler_GetByID(t *testing.T) {
 		}
 		if data.Name != "my-policy" {
 			t.Errorf("name = %q, want my-policy", data.Name)
+		}
+	})
+
+	// Issue #321: a disabled policy has no next run, whatever is stored.
+	t.Run("reports next_run_at only while enabled", func(t *testing.T) {
+		e := newTestEnv(t)
+		ctx := context.Background()
+		agentID := createDBAgent(t, e.deps, "test-agent").ID
+		policy := createDBPolicy(t, e.deps, "my-policy", agentID)
+		if err := e.deps.policies.UpdateNextRunAt(ctx, policy.ID, time.Now().UTC().Add(time.Hour)); err != nil {
+			t.Fatalf("UpdateNextRunAt: %v", err)
+		}
+
+		nextRunAt := func() *string {
+			t.Helper()
+			resp := e.get(t, "/api/v1/policies/"+policy.ID.String(), e.adminToken(t))
+			assertStatus(t, resp, http.StatusOK)
+			var data struct {
+				NextRunAt *string `json:"next_run_at"`
+			}
+			decodeData(t, resp, &data)
+			return data.NextRunAt
+		}
+
+		if got := nextRunAt(); got == nil {
+			t.Error("enabled policy next_run_at = null, want the stored next run")
+		}
+		stored, err := e.deps.policies.GetByID(ctx, policy.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		stored.Enabled = false
+		if err := e.deps.policies.Update(ctx, stored); err != nil {
+			t.Fatalf("disable policy: %v", err)
+		}
+		if got := nextRunAt(); got != nil {
+			t.Errorf("disabled policy next_run_at = %q, want null", *got)
 		}
 	})
 
