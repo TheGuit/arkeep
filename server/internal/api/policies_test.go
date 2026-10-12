@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/google/uuid"
@@ -69,6 +70,39 @@ func TestPolicyHandler_List(t *testing.T) {
 			t.Errorf("total = %d, want 2", data.Total)
 		}
 	})
+}
+
+// TestPolicyHandler_ListSortByAgent: the policies list sorts by the agent's
+// name on ?sort=agent (issue #320), and by policy name by default.
+func TestPolicyHandler_ListSortByAgent(t *testing.T) {
+	e := newTestEnv(t)
+	createDBPolicy(t, e.deps, "a-policy", createDBAgent(t, e.deps, "zulu").ID)
+	createDBPolicy(t, e.deps, "b-policy", createDBAgent(t, e.deps, "alpha").ID)
+
+	names := func(query string) []string {
+		t.Helper()
+		resp := e.get(t, "/api/v1/policies"+query, e.adminToken(t))
+		assertStatus(t, resp, http.StatusOK)
+		var data struct {
+			Items []struct {
+				Name      string `json:"name"`
+				AgentName string `json:"agent_name"`
+			} `json:"items"`
+		}
+		decodeData(t, resp, &data)
+		var got []string
+		for _, p := range data.Items {
+			got = append(got, p.Name+"@"+p.AgentName)
+		}
+		return got
+	}
+
+	if got, want := names(""), []string{"a-policy@zulu", "b-policy@alpha"}; !slices.Equal(got, want) {
+		t.Errorf("default order = %v, want %v", got, want)
+	}
+	if got, want := names("?sort=agent"), []string{"b-policy@alpha", "a-policy@zulu"}; !slices.Equal(got, want) {
+		t.Errorf("sort=agent = %v, want %v", got, want)
+	}
 }
 
 func TestPolicyHandler_GetByID(t *testing.T) {

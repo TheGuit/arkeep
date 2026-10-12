@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import {
@@ -45,6 +45,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { api, apiErrorMessage } from '@/services/api'
 import type { Policy, ApiResponse, TriggerResponse } from '@/types'
 import PolicySheet from '@/components/policies/PolicySheet.vue'
+import SortableTableHead from '@/components/shared/SortableTableHead.vue'
+import { useListSort } from '@/composables/useListSort'
 
 interface PolicyListResponse {
     items: Policy[]
@@ -67,6 +69,9 @@ const page = ref(1)
 const pageSize = 50
 const offset = computed(() => (page.value - 1) * pageSize)
 const totalPages = computed(() => Math.ceil(total.value / pageSize))
+
+// Server-side column sort, kept in the URL; by name when unset (issue #320).
+const { sortKey, sortOrder, queryParams: sortParams, toggle: toggleSort } = useListSort({ key: 'name' })
 
 // Sheet
 const sheetOpen = ref(false)
@@ -114,7 +119,7 @@ async function fetchPolicies() {
     loading.value = true
     error.value = null
     try {
-        const res = await api<ApiResponse<PolicyListResponse>>(`/api/v1/policies?limit=${pageSize}&offset=${offset.value}`)
+        const res = await api<ApiResponse<PolicyListResponse>>(`/api/v1/policies?limit=${pageSize}&offset=${offset.value}${sortParams.value}`)
         policies.value = res.data.items
         total.value = res.data.total
     } catch (e: any) {
@@ -123,6 +128,12 @@ async function fetchPolicies() {
         loading.value = false
     }
 }
+
+// A new sort starts again from the first page.
+watch(sortParams, () => {
+    page.value = 1
+    fetchPolicies()
+})
 
 // ---------------------------------------------------------------------------
 // Sheet
@@ -238,10 +249,13 @@ onMounted(fetchPolicies)
             <Table>
                 <TableHeader>
                     <TableRow>
-                        <TableHead>Name</TableHead>
-                        <TableHead>Agent</TableHead>
+                        <SortableTableHead label="Name" :active="sortKey === 'name'" :order="sortOrder"
+                            @toggle="toggleSort('name')" />
+                        <SortableTableHead label="Agent" :active="sortKey === 'agent'" :order="sortOrder"
+                            @toggle="toggleSort('agent')" />
                         <TableHead>Schedule</TableHead>
-                        <TableHead>Status</TableHead>
+                        <SortableTableHead label="Status" :active="sortKey === 'status'" :order="sortOrder"
+                            @toggle="toggleSort('status', 'desc')" />
                         <TableHead class="w-13" />
                     </TableRow>
                 </TableHeader>

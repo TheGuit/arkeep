@@ -123,23 +123,19 @@ func (r *gormDestinationRepository) Delete(ctx context.Context, id uuid.UUID) er
 	})
 }
 
-// destinationOrderClause maps ListOptions.SortBy to a safe ORDER BY clause via a
-// fixed whitelist, so the sort column can never be attacker-controlled SQL.
-// Unknown or empty SortBy falls back to the historical default (created_at ASC).
+// destinationSortColumns are the sortable columns of the destinations list.
+var destinationSortColumns = map[string]sortColumn{
+	"usage":   {exprs: []string{"repo_size_bytes"}},
+	"name":    {exprs: []string{"name"}},
+	"created": {exprs: []string{"created_at"}},
+	"type":    {exprs: []string{"type"}},
+}
+
+// destinationOrderClause maps ListOptions.SortBy to a safe ORDER BY clause (see
+// orderClause). Unknown or empty SortBy falls back to the historical default
+// (created_at ASC).
 func destinationOrderClause(opts ListOptions) string {
-	col, ok := map[string]string{
-		"usage":   "repo_size_bytes",
-		"name":    "name",
-		"created": "created_at",
-		"type":    "type",
-	}[opts.SortBy]
-	if !ok {
-		return "created_at ASC"
-	}
-	if opts.SortDesc {
-		return col + " DESC"
-	}
-	return col + " ASC"
+	return orderClause(opts, destinationSortColumns, "created_at ASC", "id ASC")
 }
 
 // ListFiltered returns a paginated list of destinations matching the given filter.

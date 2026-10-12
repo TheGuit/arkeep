@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"testing"
 )
 
@@ -29,6 +30,30 @@ func TestAgentHandler_List(t *testing.T) {
 		}
 		if data.Total != 0 {
 			t.Errorf("total = %d, want 0", data.Total)
+		}
+	})
+
+	// Issue #320: ?sort= and ?order=desc reach the repository.
+	t.Run("sorts by name descending", func(t *testing.T) {
+		e := newTestEnv(t)
+		for _, name := range []string{"bravo", "alpha", "charlie"} {
+			createDBAgent(t, e.deps, name)
+		}
+
+		resp := e.get(t, "/api/v1/agents?sort=name&order=desc", e.adminToken(t))
+		assertStatus(t, resp, http.StatusOK)
+		var data struct {
+			Items []struct {
+				Name string `json:"name"`
+			} `json:"items"`
+		}
+		decodeData(t, resp, &data)
+		var got []string
+		for _, a := range data.Items {
+			got = append(got, a.Name)
+		}
+		if want := []string{"charlie", "bravo", "alpha"}; !slices.Equal(got, want) {
+			t.Errorf("agents = %v, want %v", got, want)
 		}
 	})
 

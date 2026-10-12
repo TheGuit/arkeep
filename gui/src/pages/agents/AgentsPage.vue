@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import {
@@ -44,6 +44,8 @@ import { wsClient } from '@/services/websocket'
 import type { Agent, AgentStatus, ApiResponse } from '@/types'
 import AgentSheet from '@/components/agents/AgentSheet.vue'
 import UpgradeIndicator from '@/components/shared/UpgradeIndicator.vue'
+import SortableTableHead from '@/components/shared/SortableTableHead.vue'
+import { useListSort } from '@/composables/useListSort'
 import { useUpdateStore } from '@/stores/update'
 
 // The list endpoint returns { items, total } — not aligned with PaginatedResponse
@@ -68,6 +70,9 @@ const error = ref<string | null>(null)
 
 const page = ref(1)
 const pageSize = 20
+
+// Server-side column sort, kept in the URL; by name when unset (issue #320).
+const { sortKey, sortOrder, queryParams: sortParams, toggle: toggleSort } = useListSort({ key: 'name' })
 
 // Tracks live status overrides received via WebSocket.
 // Keyed by agent ID so we only override the field that changed without
@@ -110,7 +115,7 @@ async function fetchAgents() {
     error.value = null
     try {
         const res = await api<ApiResponse<AgentListResponse>>(
-            `/api/v1/agents?limit=${pageSize}&offset=${offset.value}`
+            `/api/v1/agents?limit=${pageSize}&offset=${offset.value}${sortParams.value}`
         )
         agents.value = res.data.items
         total.value = res.data.total
@@ -153,6 +158,12 @@ function teardownSubscriptions() {
 // ---------------------------------------------------------------------------
 // Pagination
 // ---------------------------------------------------------------------------
+
+// A new sort starts again from the first page.
+watch(sortParams, () => {
+    page.value = 1
+    fetchAgents()
+})
 
 async function goToPage(p: number) {
     if (p < 1 || p > totalPages.value) return
@@ -299,12 +310,18 @@ onUnmounted(teardownSubscriptions)
             <Table>
                 <TableHeader>
                     <TableRow>
-                        <TableHead>Name</TableHead>
-                        <TableHead>Hostname</TableHead>
-                        <TableHead>OS / Arch</TableHead>
-                        <TableHead>Version</TableHead>
-                        <TableHead>Status</TableHead>
-                        <TableHead>Last Seen</TableHead>
+                        <SortableTableHead label="Name" :active="sortKey === 'name'" :order="sortOrder"
+                            @toggle="toggleSort('name')" />
+                        <SortableTableHead label="Hostname" :active="sortKey === 'hostname'" :order="sortOrder"
+                            @toggle="toggleSort('hostname')" />
+                        <SortableTableHead label="OS / Arch" :active="sortKey === 'os'" :order="sortOrder"
+                            @toggle="toggleSort('os')" />
+                        <SortableTableHead label="Version" :active="sortKey === 'version'" :order="sortOrder"
+                            @toggle="toggleSort('version')" />
+                        <SortableTableHead label="Status" :active="sortKey === 'status'" :order="sortOrder"
+                            @toggle="toggleSort('status')" />
+                        <SortableTableHead label="Last Seen" :active="sortKey === 'last_seen'" :order="sortOrder"
+                            @toggle="toggleSort('last_seen', 'desc')" />
                         <TableHead class="w-13" />
                     </TableRow>
                 </TableHeader>
