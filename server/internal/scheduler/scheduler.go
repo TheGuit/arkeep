@@ -31,6 +31,7 @@ import (
 
 	"github.com/go-co-op/gocron/v2"
 	"github.com/google/uuid"
+	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -590,7 +591,7 @@ func (s *Scheduler) createAndDispatch(policy *db.Policy, destinations []reposito
 	// it must not shift the policy's last/next run.
 	if resumeOf == nil {
 		now := time.Now().UTC()
-		if err := s.policies.UpdateSchedule(ctx, policy.ID, now, now); err != nil {
+		if err := s.policies.UpdateSchedule(ctx, policy.ID, now, nextScheduledRunAt(policy.Schedule, now)); err != nil {
 			// Non-fatal — the job was already created, just log the failure.
 			s.logger.Warn("failed to update policy schedule timestamps",
 				zap.String("policy_id", policy.ID.String()),
@@ -611,6 +612,20 @@ func (s *Scheduler) createAndDispatch(policy *db.Policy, destinations []reposito
 	}
 
 	return job, nil
+}
+
+// nextScheduledRunAt returns the next time a cron schedule fires strictly after
+// now, using the same standard 5-field syntax gocron is configured with
+// (gocron.CronJob(schedule, false)). It lets a finished run record a sensible
+// next_run_at instead of echoing the run's own timestamp back as the next run
+// (issue #321). An unparseable schedule falls back to now so the value is never
+// reported as earlier than the run that just happened.
+func nextScheduledRunAt(schedule string, now time.Time) time.Time {
+	parsed, err := cron.ParseStandard(schedule)
+	if err != nil {
+		return now
+	}
+	return parsed.Next(now)
 }
 
 // dispatch sends a job that is not in the destination queue: a fresh run, or a

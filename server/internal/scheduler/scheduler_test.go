@@ -664,3 +664,51 @@ func TestTriggerNow_AlreadyQueued(t *testing.T) {
 		t.Errorf("second TriggerNow error = %v, want ErrJobAlreadyQueued", err)
 	}
 }
+
+// TestScheduledRunAdvancesNextRunAt covers issue #321: after a scheduled run the
+// policy's next_run_at must point at the next cron firing, not be left equal to
+// last_run_at (which made the UI show NEXT RUN == LAST RUN for hourly schedules).
+func TestScheduledRunAdvancesNextRunAt(t *testing.T) {
+	s, gdb, policies, _ := newTestScheduler(t)
+	ctx := context.Background()
+
+	agent := &db.Agent{Name: "test-agent", Status: "online", Labels: "{}"}
+	if err := repositories.NewAgentRepository(gdb).Create(ctx, agent); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	policy := &db.Policy{
+		Name:              "hourly-policy",
+		AgentID:           agent.ID,
+		Schedule:          "0 * * * *", // hourly, on the top of the hour
+		Enabled:           true,
+		Sources:           `["/data"]`,
+		RepoPassword:      db.EncryptedString("repo-secret"),
+		ResumeInterrupted: true,
+	}
+	if err := policies.Create(ctx, policy); err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+
+	if _, err := s.createAndDispatch(policy, nil, nil); err != nil {
+		t.Fatalf("createAndDispatch: %v", err)
+	}
+
+	stored, err := policies.GetByID(ctx, policy.ID)
+	if err != nil {
+		t.Fatalf("GetByID(policy): %v", err)
+	}
+	if stored.LastRunAt == nil {
+		t.Fatal("policy LastRunAt = nil, want it set after a scheduled run")
+	}
+	if stored.NextRunAt == nil {
+		t.Fatal("policy NextRunAt = nil, want it set after a scheduled run")
+	}
+	if !stored.NextRunAt.After(*stored.LastRunAt) {
+		t.Errorf("policy NextRunAt (%v) must be after LastRunAt (%v) for an hourly schedule",
+			*stored.NextRunAt, *stored.LastRunAt)
+	}
+	if d := stored.NextRunAt.Sub(*stored.LastRunAt); d <= 0 || d > time.Hour {
+		t.Errorf("NextRunAt-LastRunAt = %v, want in (0, 1h] for an hourly schedule", d)
+	}
+}
