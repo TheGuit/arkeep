@@ -11,6 +11,7 @@ import (
 	"github.com/arkeep-io/arkeep/server/internal/db"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // gormDestinationRepository is the GORM implementation of DestinationRepository.
@@ -261,51 +262,29 @@ func (r *gormDestinationRepository) UpdateLastCheck(ctx context.Context, destina
 	return nil
 }
 
-// busyHolderInactive matches a destination whose busy gate is held by a job
-// that can no longer release it: the job is gone (removed by job retention) or
-// no longer pending/waiting/running (it finished, was cancelled or was
-// interrupted without its release reaching the gate). Such a gate is stale
-// (issue #290).
+// lockHolderActive matches a destination_locks row whose job can still release
+// it: pending, waiting or running. The hold of a job that finished, was
+// cancelled or was interrupted without its release reaching the lock is stale
+// (issue #290): it is ignored, and cleared by the next claim on the destination.
 //
 // A waiting job counts as active: the queue dispatcher claims a queued job's
-// gates just before moving it back to pending (issue #285), and a gate caught
-// between the two must not be taken over. Should the move never happen, the
-// job still re-claims its own gate on the next drain (TryAcquireBusy is
+// destinations just before moving it back to pending (issue #285), and a hold
+// caught between the two must not be taken over. Should the move never happen,
+// the job still re-claims its own hold on the next drain (TryAcquireBusyAll is
 // idempotent for the holder), and the queue timeout ends it otherwise.
-const busyHolderInactive = `NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.id = destinations.busy_job_id AND jobs.status IN ('pending', 'waiting', 'running'))`
+const lockHolderActive = `EXISTS (SELECT 1 FROM jobs WHERE jobs.id = destination_locks.job_id AND jobs.status IN ('pending', 'waiting', 'running'))`
 
-// TryAcquireBusy atomically claims the destination for jobID if it is not
-// already busy. A false, nil-error return means another job already holds
-// it — the caller should skip or defer this dispatch, not treat it as an
-// error. Idempotent for the same jobID (matches if already held by jobID
-// itself), so retrying a dispatch that previously acquired the gate — e.g.
-// DispatchPending resending to an agent that just reconnected — never
-// mistakes its own hold for contention. A gate held by an inactive job (see
-// busyHolderInactive) is taken over, so a release that never happened cannot
-// lock the destination out forever.
-func (r *gormDestinationRepository) TryAcquireBusy(ctx context.Context, destinationID, jobID uuid.UUID) (bool, error) {
-	now := time.Now().UTC()
-	result := r.db.WithContext(ctx).
-		Model(&db.Destination{}).
-		Where("id = ? AND (busy_job_id IS NULL OR busy_job_id = ? OR "+busyHolderInactive+")", destinationID, jobID).
-		Updates(map[string]any{
-			"busy_job_id": jobID,
-			"busy_since":  now,
-		})
-	if result.Error != nil {
-		return false, fmt.Errorf("destinations: try acquire busy: %w", result.Error)
-	}
-	return result.RowsAffected == 1, nil
-}
-
-// TryAcquireBusyAll claims every destination in destinationIDs for jobID, or
-// none of them: a job that needs several destinations must never hold some
-// while waiting for the rest, otherwise two jobs each holding what the other
-// needs would wait forever (issue #285). Same matching rules as TryAcquireBusy.
-// Rows are claimed in ID order so concurrent callers lock them in the same
-// order. A false, nil-error return means at least one destination is held by
-// another job and nothing was claimed.
-func (r *gormDestinationRepository) TryAcquireBusyAll(ctx context.Context, destinationIDs []uuid.UUID, jobID uuid.UUID) (bool, error) {
+// TryAcquireBusyAll claims every destination in destinationIDs for jobID in
+// mode (db.LockShared or db.LockExclusive), or none of them: a job that needs
+// several destinations must never hold some while waiting for the rest,
+// otherwise two jobs each holding what the other needs would wait forever
+// (issue #285). A shared claim only conflicts with an exclusive hold, an
+// exclusive claim with any hold (issue #319). A false, nil-error return means
+// at least one destination is held in a conflicting mode and nothing was
+// claimed. Idempotent for the holder, so a dispatch retried for the same job —
+// DispatchPending re-sending to an agent that just reconnected — never mistakes
+// its own hold for contention.
+func (r *gormDestinationRepository) TryAcquireBusyAll(ctx context.Context, destinationIDs []uuid.UUID, jobID uuid.UUID, mode string) (bool, error) {
 	if len(destinationIDs) == 0 {
 		return true, nil
 	}
@@ -316,21 +295,39 @@ func (r *gormDestinationRepository) TryAcquireBusyAll(ctx context.Context, desti
 	errBusy := errors.New("destination busy")
 	now := time.Now().UTC()
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		for _, id := range ids {
-			result := tx.Model(&db.Destination{}).
-				Where("id = ? AND (busy_job_id IS NULL OR busy_job_id = ? OR "+busyHolderInactive+")", id, jobID).
-				Updates(map[string]any{
-					"busy_job_id": jobID,
-					"busy_since":  now,
-				})
-			if result.Error != nil {
-				return result.Error
-			}
-			if result.RowsAffected != 1 {
-				return errBusy
-			}
+		// Lock the destination rows, in ID order, so concurrent claims on the
+		// same destinations take turns (PostgreSQL; SQLite has a single
+		// connection and serialises them anyway).
+		var locked []uuid.UUID
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Model(&db.Destination{}).
+			Where("id IN ?", ids).
+			Order("id").
+			Pluck("id", &locked).Error; err != nil {
+			return err
 		}
-		return nil
+		if err := tx.Where("destination_id IN ? AND NOT "+lockHolderActive, ids).
+			Delete(&db.DestinationLock{}).Error; err != nil {
+			return err
+		}
+
+		conflicts := tx.Model(&db.DestinationLock{}).Where("destination_id IN ? AND job_id <> ?", ids, jobID)
+		if mode == db.LockShared {
+			conflicts = conflicts.Where("mode = ?", db.LockExclusive)
+		}
+		var n int64
+		if err := conflicts.Limit(1).Count(&n).Error; err != nil {
+			return err
+		}
+		if n > 0 {
+			return errBusy
+		}
+
+		locks := make([]db.DestinationLock, 0, len(ids))
+		for _, id := range ids {
+			locks = append(locks, db.DestinationLock{DestinationID: id, JobID: jobID, Mode: mode, AcquiredAt: now})
+		}
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&locks).Error
 	})
 	if errors.Is(err, errBusy) {
 		return false, nil
@@ -341,59 +338,60 @@ func (r *gormDestinationRepository) TryAcquireBusyAll(ctx context.Context, desti
 	return true, nil
 }
 
-// ReleaseBusy clears the busy gate only if jobID is still the current
-// holder, so a stale or duplicate release can never clear a newer lock.
+// ReleaseBusy releases jobID's hold on the destination. Releasing a hold the
+// job does not have is a no-op, so a stale or duplicate release can never free
+// another job's hold.
 func (r *gormDestinationRepository) ReleaseBusy(ctx context.Context, destinationID, jobID uuid.UUID) error {
-	result := r.db.WithContext(ctx).
-		Model(&db.Destination{}).
-		Where("id = ? AND busy_job_id = ?", destinationID, jobID).
-		Updates(map[string]any{
-			"busy_job_id": nil,
-			"busy_since":  nil,
-		})
-	if result.Error != nil {
-		return fmt.Errorf("destinations: release busy: %w", result.Error)
+	if err := r.db.WithContext(ctx).
+		Where("destination_id = ? AND job_id = ?", destinationID, jobID).
+		Delete(&db.DestinationLock{}).Error; err != nil {
+		return fmt.Errorf("destinations: release busy: %w", err)
 	}
 	return nil
 }
 
-// ReleaseBusyForJobs bulk-releases the busy gate for a set of jobs, used by
-// orphan recovery (an agent disconnected or the server restarted while a
-// busy-holding job was running) so the gate can never get stuck.
+// ReleaseBusyForJobs releases every hold of a set of jobs, so a job that ends
+// without reporting each destination can never leave one locked.
 func (r *gormDestinationRepository) ReleaseBusyForJobs(ctx context.Context, jobIDs []uuid.UUID) error {
 	if len(jobIDs) == 0 {
 		return nil
 	}
-	result := r.db.WithContext(ctx).
-		Model(&db.Destination{}).
-		Where("busy_job_id IN ?", jobIDs).
-		Updates(map[string]any{
-			"busy_job_id": nil,
-			"busy_since":  nil,
-		})
-	if result.Error != nil {
-		return fmt.Errorf("destinations: release busy for jobs: %w", result.Error)
+	if err := r.db.WithContext(ctx).
+		Where("job_id IN ?", jobIDs).
+		Delete(&db.DestinationLock{}).Error; err != nil {
+		return fmt.Errorf("destinations: release busy for jobs: %w", err)
 	}
 	return nil
 }
 
-// ReleaseStaleBusy clears every busy gate held by an inactive job (see
-// busyHolderInactive). Called once at server startup, after jobs left running
-// by the previous process have been marked interrupted, so the busy state the
-// GUI shows reflects only operations actually in flight. Returns the number of
-// destinations released.
+// ReleaseStaleBusy clears every hold of an inactive job (see lockHolderActive).
+// Called once at server startup, after jobs left running by the previous
+// process have been marked interrupted, so the busy state the GUI shows reflects
+// only operations actually in flight. Returns the number of holds released.
 func (r *gormDestinationRepository) ReleaseStaleBusy(ctx context.Context) (int64, error) {
 	result := r.db.WithContext(ctx).
-		Model(&db.Destination{}).
-		Where("busy_job_id IS NOT NULL AND " + busyHolderInactive).
-		Updates(map[string]any{
-			"busy_job_id": nil,
-			"busy_since":  nil,
-		})
+		Where("NOT " + lockHolderActive).
+		Delete(&db.DestinationLock{})
 	if result.Error != nil {
 		return 0, fmt.Errorf("destinations: release stale busy: %w", result.Error)
 	}
 	return result.RowsAffected, nil
+}
+
+// ListLocks returns the holds of active jobs on the given destinations, oldest
+// first.
+func (r *gormDestinationRepository) ListLocks(ctx context.Context, destinationIDs []uuid.UUID) ([]db.DestinationLock, error) {
+	if len(destinationIDs) == 0 {
+		return nil, nil
+	}
+	var locks []db.DestinationLock
+	if err := r.db.WithContext(ctx).
+		Where("destination_id IN ? AND "+lockHolderActive, destinationIDs).
+		Order("acquired_at ASC, job_id ASC").
+		Find(&locks).Error; err != nil {
+		return nil, fmt.Errorf("destinations: list locks: %w", err)
+	}
+	return locks, nil
 }
 
 // List returns a paginated list of destinations and the total count.

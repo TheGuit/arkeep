@@ -478,7 +478,7 @@ func TestMarkRunningJobsInterrupted_ReleasesDestinationBusyGate(t *testing.T) {
 	if err := jobRepo.Create(ctx, running); err != nil {
 		t.Fatalf("Create running job: %v", err)
 	}
-	acquired, err := destRepo.TryAcquireBusy(ctx, f.destID, running.ID)
+	acquired, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{f.destID}, running.ID, db.LockExclusive)
 	if err != nil || !acquired {
 		t.Fatalf("TryAcquireBusy: acquired=%v err=%v", acquired, err)
 	}
@@ -487,12 +487,8 @@ func TestMarkRunningJobsInterrupted_ReleasesDestinationBusyGate(t *testing.T) {
 		t.Fatalf("MarkRunningJobsInterrupted: %v", err)
 	}
 
-	dest, err := destRepo.GetByID(ctx, f.destID)
-	if err != nil {
-		t.Fatalf("GetByID: %v", err)
-	}
-	if dest.BusyJobID != nil {
-		t.Errorf("destination BusyJobID = %v after MarkRunningJobsInterrupted, want nil (gate must be released)", dest.BusyJobID)
+	if got := busyHolder(t, destRepo, f.destID); got != "" {
+		t.Errorf("destination holder = %q after MarkRunningJobsInterrupted, want nil (gate must be released)", got)
 	}
 
 	// The now-free destination must be acquirable by a different job.
@@ -500,7 +496,7 @@ func TestMarkRunningJobsInterrupted_ReleasesDestinationBusyGate(t *testing.T) {
 	if err := jobRepo.Create(ctx, other); err != nil {
 		t.Fatalf("Create other job: %v", err)
 	}
-	acquired, err = destRepo.TryAcquireBusy(ctx, f.destID, other.ID)
+	acquired, err = destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{f.destID}, other.ID, db.LockExclusive)
 	if err != nil {
 		t.Fatalf("TryAcquireBusy (other): %v", err)
 	}
@@ -539,7 +535,7 @@ func TestMarkRunningJobsInterrupted_RecoversPendingMaintenanceJobs(t *testing.T)
 				if err := jobRepo.CreateDestination(ctx, &db.JobDestination{JobID: maint.ID, DestinationID: f.destID, Status: "pending"}); err != nil {
 					t.Fatalf("CreateDestination: %v", err)
 				}
-				if acquired, err := destRepo.TryAcquireBusy(ctx, f.destID, maint.ID); err != nil || !acquired {
+				if acquired, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{f.destID}, maint.ID, db.LockExclusive); err != nil || !acquired {
 					t.Fatalf("TryAcquireBusy: acquired=%v err=%v", acquired, err)
 				}
 				backup := &db.Job{PolicyID: &f.policyID, AgentID: f.agentID, Type: "backup", Status: "pending"}
@@ -562,12 +558,8 @@ func TestMarkRunningJobsInterrupted_RecoversPendingMaintenanceJobs(t *testing.T)
 				if stored.Status != "interrupted" {
 					t.Errorf("%s job status = %q, want \"interrupted\"", jobType, stored.Status)
 				}
-				dest, err := destRepo.GetByID(ctx, f.destID)
-				if err != nil {
-					t.Fatalf("GetByID(destination): %v", err)
-				}
-				if dest.BusyJobID != nil {
-					t.Errorf("destination BusyJobID = %v, want nil (gate must be released)", dest.BusyJobID)
+				if got := busyHolder(t, destRepo, f.destID); got != "" {
+					t.Errorf("destination holder = %q, want nil (gate must be released)", got)
 				}
 				untouched, err := jobRepo.GetByID(ctx, backup.ID)
 				if err != nil {
@@ -578,6 +570,55 @@ func TestMarkRunningJobsInterrupted_RecoversPendingMaintenanceJobs(t *testing.T)
 				}
 			})
 		}
+	}
+}
+
+// TestMarkRunningJobsInterrupted_ReleasesPendingBackupGates is the regression
+// case for issue #319: a backup sent to an agent that vanished before reporting
+// "running" stays pending, waiting for DispatchPending, and must not keep its
+// destinations busy meanwhile — every other job on them would wait for an agent
+// that may stay away for days. The job itself is left pending: it re-claims its
+// destinations when it is re-sent on reconnect.
+func TestMarkRunningJobsInterrupted_ReleasesPendingBackupGates(t *testing.T) {
+	sweeps := map[string]func(JobRepository, context.Context, uuid.UUID) (int64, error){
+		"all agents": func(r JobRepository, ctx context.Context, _ uuid.UUID) (int64, error) {
+			return r.MarkRunningJobsInterrupted(ctx, "server restarted")
+		},
+		"one agent": func(r JobRepository, ctx context.Context, agentID uuid.UUID) (int64, error) {
+			return r.MarkRunningJobsInterruptedForAgent(ctx, agentID, "agent disconnected")
+		},
+	}
+	for name, sweep := range sweeps {
+		t.Run(name, func(t *testing.T) {
+			gormDB := newTestDB(t)
+			jobRepo := NewJobRepository(gormDB)
+			destRepo := NewDestinationRepository(gormDB)
+			f := newJobFixture(t, gormDB)
+			ctx := context.Background()
+
+			backup := &db.Job{PolicyID: &f.policyID, AgentID: f.agentID, Type: "backup", Status: "pending"}
+			if err := jobRepo.Create(ctx, backup); err != nil {
+				t.Fatalf("Create backup job: %v", err)
+			}
+			if acquired, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{f.destID}, backup.ID, db.LockShared); err != nil || !acquired {
+				t.Fatalf("TryAcquireBusy: acquired=%v err=%v", acquired, err)
+			}
+
+			if _, err := sweep(jobRepo, ctx, f.agentID); err != nil {
+				t.Fatalf("sweep: %v", err)
+			}
+
+			if got := busyHolder(t, destRepo, f.destID); got != "" {
+				t.Errorf("destination holder = %q, want nil: a pending backup of a gone agent must not hold it", got)
+			}
+			stored, err := jobRepo.GetByID(ctx, backup.ID)
+			if err != nil {
+				t.Fatalf("GetByID(backup): %v", err)
+			}
+			if stored.Status != "pending" {
+				t.Errorf("backup status = %q, want it left at \"pending\" for DispatchPending", stored.Status)
+			}
+		})
 	}
 }
 

@@ -69,9 +69,9 @@ async function submit() {
         <div>
             <h2 class="text-base font-semibold">Job Queue</h2>
             <p class="mt-1 text-sm text-muted-foreground">
-                Only one backup or retention sweep runs against a destination at a time. Jobs that find
-                a destination busy wait in the queue and start automatically, oldest first, as soon as
-                all their destinations are free.
+                Backups to the same destination run side by side, while a retention sweep or integrity
+                check needs the destination alone. Jobs that find a destination busy wait in the queue
+                and start automatically, oldest first, as soon as all their destinations are free.
             </p>
         </div>
         <Button variant="outline" size="icon" aria-label="Refresh" :disabled="loading" @click="fetchSettings">

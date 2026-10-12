@@ -230,14 +230,33 @@ type Destination struct {
 	LastCheckAt     *time.Time
 	LastCheckStatus string     `gorm:"not null;default:''"`
 	LastCheckJobID  *uuid.UUID `gorm:"type:text"`
+}
 
-	// Busy gate: which job (backup or retention, on any agent) currently holds
-	// this destination's repository, so a second dispatch can be skipped
-	// server-side instead of racing restic's own lock file. No FK — the
-	// holding job may be deleted by job-log retention after it completes, at
-	// which point the gate has already been released anyway.
-	BusyJobID *uuid.UUID `gorm:"type:text"`
-	BusySince *time.Time
+// Destination lock modes (issue #319). A backup holds its destinations shared:
+// restic's own lock for a backup is non-exclusive, so backups run side by side.
+// A retention sweep or an integrity check holds its destination exclusive.
+const (
+	LockShared    = "shared"
+	LockExclusive = "exclusive"
+)
+
+// LockModeFor returns the mode a job of jobType holds its destinations in.
+func LockModeFor(jobType string) string {
+	if jobType == "backup" {
+		return LockShared
+	}
+	return LockExclusive
+}
+
+// DestinationLock is one job's hold on a destination's repository: the
+// server-side gate that keeps a retention sweep or integrity check from running
+// alongside anything else on the same repository, instead of racing restic's
+// own lock file (issues #130, #319). Deleting the job drops its holds.
+type DestinationLock struct {
+	DestinationID uuid.UUID `gorm:"type:text;primaryKey"`
+	JobID         uuid.UUID `gorm:"type:text;primaryKey"`
+	Mode          string    `gorm:"not null"` // LockShared | LockExclusive
+	AcquiredAt    time.Time `gorm:"not null"`
 }
 
 // -----------------------------------------------------------------------------

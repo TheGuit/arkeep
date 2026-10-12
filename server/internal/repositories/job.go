@@ -129,7 +129,7 @@ var terminalJobStatuses = []string{"succeeded", "failed", "cancelled", "interrup
 // gave up on the job cannot resurrect it. Returns ErrNotFound if no such job
 // exists.
 //
-// Moving a job to a terminal status also releases any destination busy gate it
+// Moving a job to a terminal status also releases any destination lock it
 // still holds, in the same transaction: whichever path ends the job (agent
 // report, user cancel, server-side failure), the gate never outlives it
 // (issue #290).
@@ -157,12 +157,7 @@ func (r *gormJobRepository) UpdateStatus(ctx context.Context, id uuid.UUID, stat
 		if rowsAffected == 0 || !slices.Contains(terminalJobStatuses, status) {
 			return nil
 		}
-		return tx.Model(&db.Destination{}).
-			Where("busy_job_id = ?", id).
-			Updates(map[string]interface{}{
-				"busy_job_id": nil,
-				"busy_since":  nil,
-			}).Error
+		return tx.Where("job_id = ?", id).Delete(&db.DestinationLock{}).Error
 	})
 	if err != nil {
 		return fmt.Errorf("jobs: update status: %w", err)
@@ -190,7 +185,10 @@ func (r *gormJobRepository) UpdateStatus(ctx context.Context, id uuid.UUID, stat
 // Pending retention jobs are swept too: unlike a pending backup, which
 // DispatchPending re-sends on reconnect, a retention job has no retry queue, so
 // one the agent never picked up would hold its destination's busy gate forever
-// (issue #283).
+// (issue #283). A pending backup stays pending, but the gates it claimed when it
+// was sent are released (issue #319): the agent may stay away for days, and
+// every other job on those destinations would wait for it. DispatchPending
+// claims them again when it re-sends the job.
 //
 // "interrupted" rather than "failed" is what makes these jobs eligible for
 // automatic resume: the agent vanished, it did not report an error. The
@@ -212,6 +210,9 @@ func (r *gormJobRepository) MarkRunningJobsInterruptedForAgent(ctx context.Conte
 			Where("agent_id = ? AND (status = ? OR (type IN ? AND status = ?))", agentID, "running", maintenanceJobTypes, "pending").
 			Pluck("id", &jobIDs).Error; err != nil {
 			return fmt.Errorf("select running jobs: %w", err)
+		}
+		if err := releasePendingBackupGates(tx, &agentID); err != nil {
+			return err
 		}
 		if len(jobIDs) == 0 {
 			return nil
@@ -253,9 +254,9 @@ func (r *gormJobRepository) MarkResumeExhausted(ctx context.Context, id uuid.UUI
 }
 
 // MarkRunningJobsInterrupted does the same for every agent, pending retention
-// jobs included. Called once at server startup: a job that was running when the
-// process died has no stream teardown to recover it and would stay "running"
-// forever.
+// jobs and the gates of pending backups included. Called once at server
+// startup: a job that was running when the process died has no stream teardown
+// to recover it and would stay "running" forever.
 //
 // Returns the number of jobs updated.
 func (r *gormJobRepository) MarkRunningJobsInterrupted(ctx context.Context, errMsg string) (int64, error) {
@@ -266,6 +267,9 @@ func (r *gormJobRepository) MarkRunningJobsInterrupted(ctx context.Context, errM
 			Where("status = ? OR (type IN ? AND status = ?)", "running", maintenanceJobTypes, "pending").
 			Pluck("id", &jobIDs).Error; err != nil {
 			return fmt.Errorf("select running jobs: %w", err)
+		}
+		if err := releasePendingBackupGates(tx, nil); err != nil {
+			return err
 		}
 		if len(jobIDs) == 0 {
 			return nil
@@ -279,6 +283,23 @@ func (r *gormJobRepository) MarkRunningJobsInterrupted(ctx context.Context, errM
 		return 0, fmt.Errorf("jobs: mark running interrupted: %w", err)
 	}
 	return updated, nil
+}
+
+// releasePendingBackupGates releases, inside tx, the destination locks held by
+// pending backups — of agentID, or of every agent when it is nil (issue
+// #319). Such a backup was sent to an agent that is gone: the job stays pending
+// for DispatchPending, which claims its destinations again when it re-sends it.
+func releasePendingBackupGates(tx *gorm.DB, agentID *uuid.UUID) error {
+	pending := tx.Session(&gorm.Session{NewDB: true}).Model(&db.Job{}).
+		Select("id").
+		Where("type = ? AND status = ?", "backup", "pending")
+	if agentID != nil {
+		pending = pending.Where("agent_id = ?", *agentID)
+	}
+	if err := tx.Where("job_id IN (?)", pending).Delete(&db.DestinationLock{}).Error; err != nil {
+		return fmt.Errorf("release pending backup gates: %w", err)
+	}
+	return nil
 }
 
 // interruptJobs marks jobIDs "interrupted" inside tx, closes out their child
@@ -317,15 +338,10 @@ func interruptJobs(tx *gorm.DB, jobIDs []uuid.UUID, now time.Time, errMsg string
 		}).Error; err != nil {
 		return 0, fmt.Errorf("update job retention tags: %w", err)
 	}
-	// Release any destination busy gate these jobs held — an agent that
-	// vanished mid-operation must never leave a destination permanently
-	// locked out of future backups/retention (issue #130).
-	if err := tx.Model(&db.Destination{}).
-		Where("busy_job_id IN ?", jobIDs).
-		Updates(map[string]interface{}{
-			"busy_job_id": nil,
-			"busy_since":  nil,
-		}).Error; err != nil {
+	// Release any destination lock these jobs held — an agent that vanished
+	// mid-operation must never leave a destination permanently locked out of
+	// future backups/retention (issue #130).
+	if err := tx.Where("job_id IN ?", jobIDs).Delete(&db.DestinationLock{}).Error; err != nil {
 		return 0, fmt.Errorf("release destination busy gate: %w", err)
 	}
 	return result.RowsAffected, nil
@@ -744,19 +760,23 @@ func (r *gormJobRepository) ListWaiting(ctx context.Context, limit int) ([]db.Jo
 }
 
 // HasWaitingForDestinations reports whether a waiting job other than
-// excludeJobID still needs any of destinationIDs.
-func (r *gormJobRepository) HasWaitingForDestinations(ctx context.Context, destinationIDs []uuid.UUID, excludeJobID uuid.UUID) (bool, error) {
+// excludeJobID still needs any of destinationIDs in a mode that conflicts with
+// mode: any waiting job for an exclusive claim, only a waiting exclusive job
+// (any type but backup, see db.LockModeFor) for a shared one (issue #319).
+func (r *gormJobRepository) HasWaitingForDestinations(ctx context.Context, destinationIDs []uuid.UUID, excludeJobID uuid.UUID, mode string) (bool, error) {
 	if len(destinationIDs) == 0 {
 		return false, nil
 	}
-	var count int64
-	err := r.db.WithContext(ctx).
+	query := r.db.WithContext(ctx).
 		Model(&db.JobDestination{}).
 		Joins("INNER JOIN jobs ON jobs.id = job_destinations.job_id").
 		Where("jobs.status = ? AND jobs.id <> ? AND job_destinations.status = ? AND job_destinations.destination_id IN ?",
-			"waiting", excludeJobID, "pending", destinationIDs).
-		Limit(1).
-		Count(&count).Error
+			"waiting", excludeJobID, "pending", destinationIDs)
+	if mode == db.LockShared {
+		query = query.Where("jobs.type <> ?", "backup")
+	}
+	var count int64
+	err := query.Limit(1).Count(&count).Error
 	if err != nil {
 		return false, fmt.Errorf("jobs: has waiting for destinations: %w", err)
 	}

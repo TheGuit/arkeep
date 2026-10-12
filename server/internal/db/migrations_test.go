@@ -427,3 +427,94 @@ func TestSQLiteMigration_S3PrefixReset(t *testing.T) {
 		}
 	}
 }
+
+// TestSQLiteMigration_DestinationLocks steps 000036 down and up with busy
+// destinations present (issue #319): the up migration must carry over the
+// holds still in effect, in the mode of the holding job, and drop a stale one;
+// the down migration keeps the oldest of several holders.
+func TestSQLiteMigration_DestinationLocks(t *testing.T) {
+	if err := InitEncryption(bytes.Repeat([]byte("k"), 32)); err != nil {
+		t.Fatalf("InitEncryption: %v", err)
+	}
+	gdb, err := New(Config{
+		Driver:   "sqlite",
+		DSN:      "file:" + t.TempDir() + "/locks.db",
+		Logger:   zap.NewNop(),
+		LogLevel: gormlogger.Silent,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sqlDB, err := gdb.DB()
+	if err != nil {
+		t.Fatalf("sql.DB: %v", err)
+	}
+	m := newSQLiteMigrator(t, sqlDB)
+	if err := m.Migrate(35); err != nil {
+		t.Fatalf("Migrate(35): %v", err)
+	}
+
+	agent := &Agent{Name: "agent", Status: "online", Labels: "{}"}
+	if err := gdb.Create(agent).Error; err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	holders := map[string]struct{ jobType, status, wantMode string }{
+		"sweep":  {"retention", "running", LockExclusive},
+		"backup": {"backup", "pending", LockShared},
+		"stale":  {"backup", "succeeded", ""},
+	}
+	dests := map[string]*Destination{}
+	jobs := map[string]*Job{}
+	for name, h := range holders {
+		d := &Destination{Name: name, Type: "local", Config: `{"path":"/r"}`, Enabled: true}
+		if err := gdb.Create(d).Error; err != nil {
+			t.Fatalf("create destination: %v", err)
+		}
+		j := &Job{AgentID: agent.ID, Type: h.jobType, Status: h.status}
+		if err := gdb.Create(j).Error; err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		if err := gdb.Exec(`UPDATE destinations SET busy_job_id = ?, busy_since = ? WHERE id = ?`, j.ID.String(), time.Now().UTC(), d.ID.String()).Error; err != nil {
+			t.Fatalf("hold destination: %v", err)
+		}
+		dests[name], jobs[name] = d, j
+	}
+
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		t.Fatalf("Up: %v", err)
+	}
+	for name, h := range holders {
+		var locks []DestinationLock
+		if err := gdb.Where("destination_id = ?", dests[name].ID).Find(&locks).Error; err != nil {
+			t.Fatalf("query locks: %v", err)
+		}
+		switch {
+		case h.wantMode == "" && len(locks) != 0:
+			t.Errorf("%s: locks = %+v, want none for a finished holder", name, locks)
+		case h.wantMode != "" && (len(locks) != 1 || locks[0].JobID != jobs[name].ID || locks[0].Mode != h.wantMode):
+			t.Errorf("%s: locks = %+v, want one %s hold by its job", name, locks, h.wantMode)
+		}
+	}
+
+	// A second backup joins the first; stepping down keeps the oldest holder.
+	other := &Job{AgentID: agent.ID, Type: "backup", Status: "running"}
+	if err := gdb.Create(other).Error; err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if err := gdb.Create(&DestinationLock{DestinationID: dests["backup"].ID, JobID: other.ID, Mode: LockShared, AcquiredAt: time.Now().UTC().Add(time.Minute)}).Error; err != nil {
+		t.Fatalf("create lock: %v", err)
+	}
+	if err := m.Migrate(35); err != nil {
+		t.Fatalf("Migrate(35) after up: %v", err)
+	}
+	var busyJobID string
+	if err := gdb.Raw(`SELECT busy_job_id FROM destinations WHERE id = ?`, dests["backup"].ID.String()).Scan(&busyJobID).Error; err != nil {
+		t.Fatalf("query busy_job_id: %v", err)
+	}
+	if busyJobID != jobs["backup"].ID.String() {
+		t.Errorf("busy_job_id after down = %q, want the oldest holder %s", busyJobID, jobs["backup"].ID)
+	}
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		t.Fatalf("Up again: %v", err)
+	}
+}

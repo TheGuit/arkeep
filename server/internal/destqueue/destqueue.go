@@ -1,17 +1,20 @@
 // Package destqueue dispatches jobs queued behind a busy destination
 // (issue #285).
 //
-// A backup or retention sweep needs exclusive use of every destination it runs
-// against (the busy gate, destinations.busy_job_id, issue #130). A job that
-// finds one of them held is not skipped: it moves to status "waiting" and this
-// package starts it as soon as all of its destinations are free.
+// Every job that runs against a destination's repository holds a lock on it
+// (destination_locks, issues #130, #319): backups hold it shared and run side
+// by side, a retention sweep or integrity check holds it exclusive. A job that
+// finds one of its destinations held in a conflicting mode is not skipped: it
+// moves to status "waiting" and this package starts it as soon as all of its
+// destinations can be claimed.
 //
 // The queue is the set of waiting jobs, ordered by creation time, and it is
-// strictly FIFO per destination: a job may only claim a destination that no
-// older waiting job is still waiting for, so a job needing several
-// destinations — or a retention sweep — is never starved by a stream of
-// younger jobs. A job claims all of its destinations in one transaction or
-// none of them, so two jobs can never each hold what the other needs.
+// FIFO per destination: a job may not claim a destination an older waiting job
+// is still waiting for in a conflicting mode, so a job needing several
+// destinations — or a retention sweep behind a stream of backups — is never
+// starved by younger jobs. A job claims all of its destinations in one
+// transaction or none of them, so two jobs can never each hold what the other
+// needs.
 //
 // The queue is drained when something may have freed a destination (a
 // destination result, a job ending, a cancel, an agent reconnecting — see
@@ -49,7 +52,7 @@ const DefaultTimeoutMinutes = 24 * 60
 const MaxTimeoutMinutes = 30 * 24 * 60
 
 // TimeoutError is the error recorded on a job that waited too long.
-const TimeoutError = "timed out waiting for destination: another backup or retention sweep kept it busy"
+const TimeoutError = "timed out waiting for destination: another operation on the repository kept it busy"
 
 // fallbackInterval is how often the queue is drained without a Notify. It only
 // matters for releases nothing notifies about (agent watchdog, server restart,
@@ -60,13 +63,13 @@ const fallbackInterval = 30 * time.Second
 const drainLimit = 500
 
 // ErrNotAdmitted is returned by a start function when the admit callback
-// refused the job: at least one destination is busy, or an older job is
-// waiting for it. Nothing was sent and no gate is held.
+// refused the job: at least one destination is held in a conflicting mode, or
+// an older job is waiting for it. Nothing was sent and no lock is held.
 var ErrNotAdmitted = errors.New("destinations busy: job must wait")
 
 // AdmitFunc is handed to a start function to claim the destinations a job is
 // about to run against. It returns false when the job must wait instead; on
-// true, every destination's busy gate is held by the job.
+// true, the job holds every destination's lock.
 type AdmitFunc func(ctx context.Context, destinationIDs []uuid.UUID) (bool, error)
 
 // Starter rebuilds and sends a queued job of one type. It resolves the
@@ -216,9 +219,10 @@ func (d *Dispatcher) Drain(ctx context.Context) {
 	timeout := d.timeout(ctx)
 	now := time.Now().UTC()
 
-	// blocked holds the destinations an older waiting job is still waiting
-	// for: younger jobs must not take them, whether or not they are free.
-	blocked := make(map[uuid.UUID]bool)
+	// blocked maps the destinations an older waiting job is still waiting for
+	// to the mode it wants them in: younger jobs must not take them in a
+	// conflicting mode, whether or not they are free.
+	blocked := make(map[uuid.UUID]string)
 
 	for i := range waiting {
 		job := &waiting[i]
@@ -243,20 +247,19 @@ func (d *Dispatcher) Drain(ctx context.Context) {
 			continue
 		}
 
+		mode := db.LockModeFor(job.Type)
 		admitted := false
 		admit := func(ctx context.Context, destIDs []uuid.UUID) (bool, error) {
-			for _, id := range destIDs {
-				if blocked[id] {
-					block(blocked, destIDs)
-					return false, nil
-				}
+			if conflicts(blocked, destIDs, mode) {
+				block(blocked, destIDs, mode)
+				return false, nil
 			}
-			ok, err := d.dests.TryAcquireBusyAll(ctx, destIDs, job.ID)
+			ok, err := d.dests.TryAcquireBusyAll(ctx, destIDs, job.ID, mode)
 			if err != nil {
 				return false, err
 			}
 			if !ok {
-				block(blocked, destIDs)
+				block(blocked, destIDs, mode)
 				return false, nil
 			}
 			// Back to pending: the job is being handed to its agent, and from
@@ -307,9 +310,25 @@ func (d *Dispatcher) Drain(ctx context.Context) {
 	}
 }
 
-func block(blocked map[uuid.UUID]bool, ids []uuid.UUID) {
+// conflicts reports whether a job claiming ids in mode would overtake an older
+// waiting job: an exclusive claim conflicts with any waiter, a shared claim
+// only with an exclusive one.
+func conflicts(blocked map[uuid.UUID]string, ids []uuid.UUID, mode string) bool {
 	for _, id := range ids {
-		blocked[id] = true
+		if waiting, ok := blocked[id]; ok && (mode == db.LockExclusive || waiting == db.LockExclusive) {
+			return true
+		}
+	}
+	return false
+}
+
+// block records that a job waits for ids in mode. An exclusive waiter is never
+// downgraded by a younger shared one.
+func block(blocked map[uuid.UUID]string, ids []uuid.UUID, mode string) {
+	for _, id := range ids {
+		if blocked[id] != db.LockExclusive {
+			blocked[id] = mode
+		}
 	}
 }
 
@@ -401,8 +420,8 @@ func (d *Dispatcher) notifyFailed(ctx context.Context, jobID uuid.UUID) {
 // drain, so it starts as soon as its destinations free up. Called by the
 // schedulers when a fresh job finds a destination busy.
 //
-// Any gate the job still holds is released first: a pending job re-sent to a
-// reconnected agent may hold the gates of its earlier dispatch, and a waiting
+// Any lock the job still holds is released first: a pending job re-sent to a
+// reconnected agent may hold the locks of its earlier dispatch, and a waiting
 // job holding some destinations while queued behind others is exactly the
 // deadlock the all-or-nothing claim exists to prevent.
 func (d *Dispatcher) Enqueue(ctx context.Context, jobID uuid.UUID) error {
@@ -418,18 +437,20 @@ func (d *Dispatcher) Enqueue(ctx context.Context, jobID uuid.UUID) error {
 	return nil
 }
 
-// AdmitNew is the admit step for a job that is not in the queue yet: it must
-// not overtake a waiting job that needs one of the same destinations, and it
-// claims every destination at once or none.
-func (d *Dispatcher) AdmitNew(jobID uuid.UUID) AdmitFunc {
+// AdmitNew is the admit step for a job of jobType that is not in the queue
+// yet: it must not overtake a waiting job that needs one of the same
+// destinations in a conflicting mode, and it claims every destination at once
+// or none.
+func (d *Dispatcher) AdmitNew(jobID uuid.UUID, jobType string) AdmitFunc {
+	mode := db.LockModeFor(jobType)
 	return func(ctx context.Context, destIDs []uuid.UUID) (bool, error) {
-		queued, err := d.jobs.HasWaitingForDestinations(ctx, destIDs, jobID)
+		queued, err := d.jobs.HasWaitingForDestinations(ctx, destIDs, jobID, mode)
 		if err != nil {
 			return false, err
 		}
 		if queued {
 			return false, nil
 		}
-		return d.dests.TryAcquireBusyAll(ctx, destIDs, jobID)
+		return d.dests.TryAcquireBusyAll(ctx, destIDs, jobID, mode)
 	}
 }

@@ -299,7 +299,7 @@ func (s *CheckScheduler) runJob(ctx context.Context, dest *db.Destination) (*db.
 		)
 	}
 
-	err = s.start(ctx, job, dest, password, s.queue.AdmitNew(job.ID))
+	err = s.start(ctx, job, dest, password, s.queue.AdmitNew(job.ID, job.Type))
 	if errors.Is(err, destqueue.ErrNotAdmitted) {
 		return job, s.queue.Enqueue(ctx, job.ID)
 	}

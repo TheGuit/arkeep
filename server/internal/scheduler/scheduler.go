@@ -622,7 +622,7 @@ func (s *Scheduler) dispatch(job *db.Job, policy *db.Policy, policyDests []repos
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	err := s.startBackup(ctx, job, policy, policyDests, s.queue.AdmitNew(job.ID))
+	err := s.startBackup(ctx, job, policy, policyDests, s.queue.AdmitNew(job.ID, job.Type))
 	if errors.Is(err, destqueue.ErrNotAdmitted) {
 		return s.queue.Enqueue(ctx, job.ID)
 	}

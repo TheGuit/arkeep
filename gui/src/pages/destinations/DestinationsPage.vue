@@ -48,6 +48,7 @@ import {
   Cloud,
 } from '@lucide/vue'
 import { formatDate } from '@/lib/jobUtils'
+import { lockExplanation, lockLabel } from '@/lib/destinationLocks'
 import { api, apiErrorMessage } from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 import type { Destination, ApiResponse } from '@/types'
@@ -369,12 +370,12 @@ onMounted(fetchDestinations)
                   <Badge :variant="dest.enabled ? 'default' : 'secondary'">
                     {{ dest.enabled ? 'Enabled' : 'Disabled' }}
                   </Badge>
-                  <!-- Busy gate: another backup or retention sweep holds the
-                       repository; links to that job (issue #290). -->
-                  <RouterLink v-if="dest.busy_job_id" :to="{ name: 'job-detail', params: { id: dest.busy_job_id } }"
-                    :title="`In use by a running job since ${formatDate(dest.busy_since)}. Other backups and retention sweeps to this destination wait until it finishes.`"
+                  <!-- Destination locks: the jobs holding the repository; links
+                       to the oldest one (issues #290, #319). -->
+                  <RouterLink v-if="dest.locks.length" :to="{ name: 'job-detail', params: { id: dest.locks[0].job_id } }"
+                    :title="`In use since ${formatDate(dest.locks[0].since)}: ${lockExplanation(dest.locks)}.`"
                     @click.stop>
-                    <Badge variant="outline" class="text-xs font-normal">Busy</Badge>
+                    <Badge variant="outline" class="text-xs font-normal">{{ lockLabel(dest.locks) }}</Badge>
                   </RouterLink>
                 </div>
               </TableCell>
