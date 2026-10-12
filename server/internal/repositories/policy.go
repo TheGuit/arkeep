@@ -168,6 +168,22 @@ func (r *gormPolicyRepository) ListEnabled(ctx context.Context) ([]db.Policy, er
 	return policies, nil
 }
 
+// UpdateNextRunAt updates next_run_at alone: the schedule was (re)registered,
+// or a firing passed without a run, so there is no last run to record.
+func (r *gormPolicyRepository) UpdateNextRunAt(ctx context.Context, id uuid.UUID, nextRunAt time.Time) error {
+	result := r.db.WithContext(ctx).
+		Model(&db.Policy{}).
+		Where("id = ?", id).
+		Update("next_run_at", nextRunAt)
+	if result.Error != nil {
+		return fmt.Errorf("policies: update next run: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // UpdateSchedule updates last_run_at and next_run_at for a policy.
 // Called by the scheduler after each job execution to keep schedule
 // metadata in sync without updating the full policy record.

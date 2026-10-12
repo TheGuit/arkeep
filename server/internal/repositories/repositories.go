@@ -264,6 +264,7 @@ type PolicyRepository interface {
 	ListByAgent(ctx context.Context, agentID uuid.UUID) ([]db.Policy, error)
 	ListEnabled(ctx context.Context) ([]db.Policy, error)
 	UpdateSchedule(ctx context.Context, id uuid.UUID, lastRunAt, nextRunAt time.Time) error
+	UpdateNextRunAt(ctx context.Context, id uuid.UUID, nextRunAt time.Time) error
 
 	// ActivePoliciesCount returns the count of enabled, non-deleted policies.
 	// Used by telemetry.
