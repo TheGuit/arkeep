@@ -478,7 +478,7 @@ func TestDrain_StalePendingFails(t *testing.T) {
 	old := time.Now().UTC().Add(-25 * time.Hour)
 
 	sent := e.pendingJob(online, "pending", d, old)
-	if ok, err := e.dests.TryAcquireBusyAll(ctx, []uuid.UUID{d.ID}, sent.ID); err != nil || !ok {
+	if ok, err := e.dests.TryAcquireBusyAll(ctx, []uuid.UUID{d.ID}, sent.ID, db.LockModeFor(sent.Type)); err != nil || !ok {
 		t.Fatalf("TryAcquireBusyAll: %v %v", ok, err)
 	}
 	unsent := e.pendingJob(offline, "pending", e.dest("d2"), old)
@@ -511,8 +511,8 @@ func TestDrain_StalePendingFails(t *testing.T) {
 	if !slices.Equal(agents.cancelled, []string{sent.ID.String()}) {
 		t.Errorf("cancels sent = %v, want only the connected agent's job %s", agents.cancelled, sent.ID)
 	}
-	if got, err := e.dests.GetByID(ctx, d.ID); err != nil || got.BusyJobID != nil {
-		t.Errorf("destination holder = %v (%v), want released", got.BusyJobID, err)
+	if got := e.holders(d); len(got) != 0 {
+		t.Errorf("holders = %v, want released", got)
 	}
 	for range 2 {
 		select {
