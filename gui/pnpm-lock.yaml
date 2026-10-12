@@ -191,6 +191,9 @@ importers:
 
   .:
     dependencies:
+      '@fontsource/be-vietnam-pro':
+        specifier: ^5.3.0
+        version: 5.3.0
       '@lucide/vue':
         specifier: ^1.55.0
         version: 1.55.0(vue@3.5.43(typescript@6.0.3))
@@ -849,6 +852,9 @@ packages:
     resolution: {integrity: sha512-043dyEKD9TDSfz080YH2vobubgg+NIo/9Fw4RAl7sEMpD8Am1DNrrSTl/GpMBjyGHoD/FbJY2QLawY+HSQsEIA==}
     peerDependencies:
       vue: '>=3.3.0'
+
+  '@fontsource/be-vietnam-pro@5.3.0':
+    resolution: {integrity: sha512-xhAQBGHDxP5BF8IJxedy5MoWUmc1DlPCcZbMLhvnPkf8TaYCbbUVs3LjpuJ4BYdTrdiCLaewNaY8z+owq/FqFw==}
 
   '@internationalized/date@3.12.4':
     resolution: {integrity: sha512-M1dEn4c1U1HsSlaVR8upZtSqvXrTkHDfv18H01uCSJyjVLDxnBR38v/fMxecmlwXKR4i9HeZcmgQAPE6A+aGJQ==}
@@ -4163,6 +4169,8 @@ snapshots:
       '@floating-ui/dom': 1.8.0
       '@floating-ui/utils': 0.2.12
       vue: 3.5.43(typescript@6.0.3)
+
+  '@fontsource/be-vietnam-pro@5.3.0': {}
 
   '@internationalized/date@3.12.4':
     dependencies:

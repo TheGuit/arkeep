@@ -21,28 +21,11 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
 
         // ── Runtime caching ─────────────────────────────────────────────────
-        // API responses are deliberately not cached: they are live state
+        // None. API responses are deliberately not cached: they are live state
         // (job progress, agent status) that would mislead when stale, and
-        // authenticated data that should not persist in the browser.
-        runtimeCaching: [
-          {
-            // External fonts and stylesheets — cache first, long TTL.
-            // fetchOptions: cors ensures the SW never caches an opaque response
-            // (status 0) that lacks CORS headers, which would cause the browser
-            // to reject the cached font on subsequent requests.
-            urlPattern: /^https:\/\/fonts\.(googleapis|gstatic)\.com\//,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'google-fonts',
-              fetchOptions: { mode: 'cors' },
-              cacheableResponse: { statuses: [200] },
-              expiration: {
-                maxEntries: 20,
-                maxAgeSeconds: 365 * 24 * 60 * 60,
-              },
-            },
-          },
-        ],
+        // authenticated data that should not persist in the browser. Fonts
+        // are bundled and precached with the other assets.
+        runtimeCaching: [],
 
         // ── SPA fallback ────────────────────────────────────────────────────
         // Unmatched navigation requests (client-side routes) fall back to
