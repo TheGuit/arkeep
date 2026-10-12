@@ -31,6 +31,7 @@ import (
 
 	"github.com/go-co-op/gocron/v2"
 	"github.com/google/uuid"
+	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -101,7 +102,10 @@ var ErrJobAlreadyQueued = errors.New("a backup for this policy is already queued
 // Scheduler wraps gocron and coordinates job creation and dispatch.
 // The zero value is not usable — create instances with New.
 type Scheduler struct {
-	cron     gocron.Scheduler
+	cron gocron.Scheduler
+	// location is where gocron evaluates schedules that carry no CRON_TZ
+	// prefix; next_run_at is computed in the same place (issue #321).
+	location *time.Location
 	policies repositories.PolicyRepository
 	jobs     repositories.JobRepository
 	dests    repositories.DestinationRepository
@@ -149,13 +153,15 @@ func New(
 	agentMgr *agentmanager.Manager,
 	logger *zap.Logger,
 ) (*Scheduler, error) {
-	s, err := gocron.NewScheduler()
+	location := time.Local
+	s, err := gocron.NewScheduler(gocron.WithLocation(location))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gocron scheduler: %w", err)
 	}
 
 	return &Scheduler{
 		cron:     s,
+		location: location,
 		policies: policies,
 		jobs:     jobs,
 		dests:    dests,
@@ -180,7 +186,10 @@ func (s *Scheduler) Start(ctx context.Context) error {
 				zap.String("policy_name", enabled[i].Name),
 				zap.Error(err),
 			)
+			continue
 		}
+		// The server may have been down past the stored next run.
+		s.refreshNextRun(ctx, &enabled[i])
 	}
 
 	s.logger.Info("scheduler started", zap.Int("policies_scheduled", len(enabled)))
@@ -212,6 +221,9 @@ func (s *Scheduler) AddPolicy(policy *db.Policy) error {
 	if err := s.addJob(policy); err != nil {
 		return fmt.Errorf("failed to add policy %s to scheduler: %w", policy.ID, err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.refreshNextRun(ctx, policy)
 	s.logger.Info("policy added to scheduler",
 		zap.String("policy_id", policy.ID.String()),
 		zap.String("policy_name", policy.Name),
@@ -519,6 +531,8 @@ func (s *Scheduler) runJob(policy *db.Policy, destinations []repositories.Policy
 			zap.String("policy_id", policy.ID.String()),
 			zap.String("policy_name", policy.Name),
 		)
+		// No run happened, but this firing has passed: point at the next one.
+		s.refreshNextRun(ctx, policy)
 		return nil, nil
 	}
 
@@ -590,7 +604,7 @@ func (s *Scheduler) createAndDispatch(policy *db.Policy, destinations []reposito
 	// it must not shift the policy's last/next run.
 	if resumeOf == nil {
 		now := time.Now().UTC()
-		if err := s.policies.UpdateSchedule(ctx, policy.ID, now, now); err != nil {
+		if err := s.policies.UpdateSchedule(ctx, policy.ID, now, nextScheduledRunAt(policy.Schedule, now, s.location)); err != nil {
 			// Non-fatal — the job was already created, just log the failure.
 			s.logger.Warn("failed to update policy schedule timestamps",
 				zap.String("policy_id", policy.ID.String()),
@@ -611,6 +625,42 @@ func (s *Scheduler) createAndDispatch(policy *db.Policy, destinations []reposito
 	}
 
 	return job, nil
+}
+
+// nextScheduledRunAt returns, in UTC, the next time a cron schedule fires
+// strictly after now, using the same standard 5-field syntax gocron is
+// configured with (gocron.CronJob(schedule, false)). It lets a run record a
+// sensible next_run_at instead of echoing its own timestamp back as the next
+// run (issue #321). An unparseable schedule falls back to now so the value is
+// never reported as earlier than the run that just happened.
+//
+// location must be the gocron scheduler's: gocron evaluates a schedule without
+// a CRON_TZ= prefix there, while robfig/cron evaluates it in the location of
+// the time it is given — passing now in UTC would put a "0 2 * * *" policy at
+// 02:00 UTC on a server running in another time zone. A schedule with an
+// explicit CRON_TZ= carries its own location either way.
+func nextScheduledRunAt(schedule string, now time.Time, location *time.Location) time.Time {
+	parsed, err := cron.ParseStandard(schedule)
+	if err != nil {
+		return now
+	}
+	return parsed.Next(now.In(location)).UTC()
+}
+
+// refreshNextRun stores the policy's next firing as its next_run_at and sets it
+// on policy, so a caller responding with the same record shows it at once. Run
+// whenever the schedule is (re)registered or a firing passes without a run;
+// non-fatal, like the timestamps written after a run.
+func (s *Scheduler) refreshNextRun(ctx context.Context, policy *db.Policy) {
+	next := nextScheduledRunAt(policy.Schedule, time.Now().UTC(), s.location)
+	if err := s.policies.UpdateNextRunAt(ctx, policy.ID, next); err != nil {
+		s.logger.Warn("failed to update policy next run",
+			zap.String("policy_id", policy.ID.String()),
+			zap.Error(err),
+		)
+		return
+	}
+	policy.NextRunAt = &next
 }
 
 // dispatch sends a job that is not in the destination queue: a fresh run, or a

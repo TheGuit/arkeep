@@ -109,8 +109,9 @@ async function submit() {
             <div class="flex flex-col gap-2 rounded-lg border px-4 py-3">
                 <Label for="timeout_minutes" class="text-sm font-medium">Queue timeout (minutes)</Label>
                 <p class="text-xs text-muted-foreground">
-                    A job still waiting after this long is marked as failed and reported like any other
-                    failed backup. 1440 is 24 hours. 0 lets jobs wait indefinitely.
+                    A job that has not started after this long — still waiting for its destinations, or
+                    pending because its agent is offline or never picked it up — is marked as failed and
+                    reported like any other failed backup. 1440 is 24 hours. 0 lets jobs wait indefinitely.
                 </p>
                 <Input id="timeout_minutes" type="number" min="0" :max="MAX_TIMEOUT_MINUTES" class="max-w-40"
                     :model-value="settings.timeout_minutes"

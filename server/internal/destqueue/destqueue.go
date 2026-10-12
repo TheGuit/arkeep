@@ -40,7 +40,8 @@ import (
 )
 
 // KeyTimeoutMinutes is the settings key holding how long, in minutes, a job may
-// wait for its destinations before it is failed. 0 disables the timeout.
+// wait to start before it is failed: in the queue for its destinations, or
+// pending for its agent (issue #325). 0 disables the timeout.
 const KeyTimeoutMinutes = "jobs.queue.timeout_minutes"
 
 // DefaultTimeoutMinutes applies while no administrator has saved a value: a
@@ -53,6 +54,10 @@ const MaxTimeoutMinutes = 30 * 24 * 60
 
 // TimeoutError is the error recorded on a job that waited too long.
 const TimeoutError = "timed out waiting for destination: another operation on the repository kept it busy"
+
+// PendingTimeoutError is the error recorded on a job still pending after the
+// timeout: its agent was offline the whole time, or never started it.
+const PendingTimeoutError = "timed out waiting for the agent to start the job: it was offline or never picked it up"
 
 // fallbackInterval is how often the queue is drained without a Notify. It only
 // matters for releases nothing notifies about (agent watchdog, server restart,
@@ -86,9 +91,11 @@ type Starter interface {
 	StartQueued(ctx context.Context, job *db.Job, admit AdmitFunc) error
 }
 
-// AgentChecker reports whether an agent has a live stream.
+// AgentChecker reports whether an agent has a live stream, and tells it to drop
+// a job (implemented by agentmanager.Manager).
 type AgentChecker interface {
 	IsConnected(agentID string) bool
+	SendCancel(agentID, jobID string) error
 }
 
 // Dispatcher owns the destination queue. The zero value is not usable —
@@ -201,11 +208,18 @@ func (d *Dispatcher) Run(ctx context.Context) {
 	}
 }
 
-// Drain fails the waiting jobs that exceeded the queue timeout, then starts
-// every waiting job whose destinations can all be claimed, oldest first.
+// Drain fails the pending and waiting jobs that exceeded the queue timeout,
+// then starts every waiting job whose destinations can all be claimed, oldest
+// first.
 func (d *Dispatcher) Drain(ctx context.Context) {
 	d.drainMu.Lock()
 	defer d.drainMu.Unlock()
+
+	timeout := d.timeout(ctx)
+	if timeout > 0 {
+		// Before listing the queue: a failed pending job frees its destinations.
+		d.failStalePending(ctx, timeout)
+	}
 
 	waiting, err := d.jobs.ListWaiting(ctx, drainLimit)
 	if err != nil {
@@ -216,7 +230,6 @@ func (d *Dispatcher) Drain(ctx context.Context) {
 		return
 	}
 
-	timeout := d.timeout(ctx)
 	now := time.Now().UTC()
 
 	// blocked maps the destinations an older waiting job is still waiting for
@@ -228,7 +241,7 @@ func (d *Dispatcher) Drain(ctx context.Context) {
 		job := &waiting[i]
 
 		if timeout > 0 && now.Sub(job.UpdatedAt) >= timeout {
-			d.failTimedOut(ctx, job)
+			d.failTimedOut(ctx, job, TimeoutError)
 			continue
 		}
 
@@ -367,36 +380,68 @@ func TimeoutMinutes(ctx context.Context, settings repositories.SettingsRepositor
 	return n
 }
 
-// failTimedOut closes a job that waited longer than the queue timeout, and
-// reports it like any other failed backup: notification and Healthchecks
-// /fail ping.
-func (d *Dispatcher) failTimedOut(ctx context.Context, job *db.Job) {
-	now := time.Now().UTC()
-	if err := d.jobs.UpdateStatus(ctx, job.ID, "failed", nil, &now, TimeoutError); err != nil {
-		if !errors.Is(err, repositories.ErrTerminalState) {
-			d.logger.Error("failed to fail a job that timed out in the queue",
+// failStalePending fails the jobs still pending after timeout (issue #325): the
+// agent was offline the whole time, or received the job and never started it.
+// Left pending, such a job silently held back every later run of its policy.
+// An agent that is connected is told to drop the job, in case it still sits
+// in its local queue. Releasing their destinations may unblock waiting jobs,
+// which the drain that called this starts.
+func (d *Dispatcher) failStalePending(ctx context.Context, timeout time.Duration) {
+	stale, err := d.jobs.ListPendingBefore(ctx, time.Now().UTC().Add(-timeout), drainLimit)
+	if err != nil {
+		d.logger.Error("failed to list stale pending jobs", zap.Error(err))
+		return
+	}
+	for i := range stale {
+		job := &stale[i]
+		if !d.failTimedOut(ctx, job, PendingTimeoutError) {
+			continue
+		}
+		if !d.agents.IsConnected(job.AgentID.String()) {
+			continue
+		}
+		if err := d.agents.SendCancel(job.AgentID.String(), job.ID.String()); err != nil {
+			d.logger.Warn("failed to cancel a timed-out job on its agent",
 				zap.String("job_id", job.ID.String()),
 				zap.Error(err),
 			)
 		}
-		return
 	}
-	d.logger.Warn("job timed out waiting for its destinations",
+}
+
+// failTimedOut closes a job that waited longer than the queue timeout with
+// errMsg, and reports it like any other failed backup: notification and
+// Healthchecks /fail ping. It reports whether the job was failed: false when it
+// had already started or ended meanwhile.
+func (d *Dispatcher) failTimedOut(ctx context.Context, job *db.Job, errMsg string) bool {
+	now := time.Now().UTC()
+	if err := d.jobs.UpdateStatus(ctx, job.ID, "failed", nil, &now, errMsg); err != nil {
+		if !errors.Is(err, repositories.ErrTerminalState) {
+			d.logger.Error("failed to fail a timed-out job",
+				zap.String("job_id", job.ID.String()),
+				zap.Error(err),
+			)
+		}
+		return false
+	}
+	d.logger.Warn("job timed out before it started",
 		zap.String("job_id", job.ID.String()),
 		zap.String("type", job.Type),
-		zap.Time("waiting_since", job.UpdatedAt),
+		zap.String("status", job.Status),
+		zap.Time("since", job.UpdatedAt),
 	)
 	d.publish(job.ID, "failed", &now)
 
 	if d.pinger != nil {
-		go d.pinger.ReportJob(context.WithoutCancel(ctx), job.ID, "failed", TimeoutError)
+		go d.pinger.ReportJob(context.WithoutCancel(ctx), job.ID, "failed", errMsg)
 	}
 	if d.notifSvc != nil {
-		go d.notifyFailed(context.WithoutCancel(ctx), job.ID)
+		go d.notifyFailed(context.WithoutCancel(ctx), job.ID, errMsg)
 	}
+	return true
 }
 
-func (d *Dispatcher) notifyFailed(ctx context.Context, jobID uuid.UUID) {
+func (d *Dispatcher) notifyFailed(ctx context.Context, jobID uuid.UUID, errMsg string) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -408,7 +453,7 @@ func (d *Dispatcher) notifyFailed(ctx context.Context, jobID uuid.UUID) {
 		)
 		return
 	}
-	if err := d.notifSvc.NotifyJobFailed(ctx, notification.JobSubjectFrom(job, dests), TimeoutError); err != nil {
+	if err := d.notifSvc.NotifyJobFailed(ctx, notification.JobSubjectFrom(job, dests), errMsg); err != nil {
 		d.logger.Warn("failed to send queue timeout notification",
 			zap.String("job_id", jobID.String()),
 			zap.Error(err),
