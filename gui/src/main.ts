@@ -1,14 +1,6 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import { registerSW } from 'virtual:pwa-register'
-// Fonts are bundled rather than loaded from Google Fonts: a self-hosted
-// instance must not make every browser that opens it call a third party.
-import '@fontsource/be-vietnam-pro/300.css'
-import '@fontsource/be-vietnam-pro/400.css'
-import '@fontsource/be-vietnam-pro/400-italic.css'
-import '@fontsource/be-vietnam-pro/500.css'
-import '@fontsource/be-vietnam-pro/600.css'
-import '@fontsource/be-vietnam-pro/700.css'
 import './style.css'
 import App from './App.vue'
 import { router } from './router'
@@ -28,6 +20,14 @@ import { router } from './router'
 //   navigator.serviceWorker.addEventListener('controllerchange', () => reload())
 // so the page reloads cleanly the moment the new SW takes over.
 registerSW({ immediate: true })
+
+// Fonts used to come from Google Fonts through a CacheFirst runtime route
+// with its own named cache. Workbox only cleans up outdated precaches, never
+// runtime caches, so browsers that ran the old SW would keep that cache
+// forever. Drop it; this is a no-op once it is gone.
+if ('caches' in window) {
+  caches.delete('google-fonts').catch(() => {})
+}
 
 const pinia = createPinia()
 const app = createApp(App)

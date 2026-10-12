@@ -20,19 +20,15 @@ export default defineConfig({
         // via the content hash in each filename.
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
 
-        // ── Runtime caching ─────────────────────────────────────────────────
-        // None. API responses are deliberately not cached: they are live state
-        // (job progress, agent status) that would mislead when stale, and
-        // authenticated data that should not persist in the browser. Fonts
-        // are bundled and precached with the other assets.
-        runtimeCaching: [],
-
         // ── SPA fallback ────────────────────────────────────────────────────
         // Unmatched navigation requests (client-side routes) fall back to
         // index.html so Vue Router can handle them offline.
         navigateFallback: '/index.html',
         navigateFallbackDenylist: [
-          // Never intercept API calls, WebSocket upgrades, or server-side auth routes
+          // Never intercept API calls, WebSocket upgrades, or server-side auth
+          // routes. There is no runtime caching either: API responses are live
+          // state (job progress, agent status) that would mislead when stale,
+          // and authenticated data that should not persist in the browser.
           /^\/api\//,
           /^\/auth\/oidc\//,
         ],
