@@ -317,6 +317,9 @@ type JobRepository interface {
 	//
 	// ListWaiting returns waiting jobs oldest first — the queue order.
 	ListWaiting(ctx context.Context, limit int) ([]db.Job, error)
+	// ListPendingBefore returns pending jobs whose status last changed before
+	// cutoff, oldest first — the ones the queue timeout fails (issue #325).
+	ListPendingBefore(ctx context.Context, cutoff time.Time, limit int) ([]db.Job, error)
 	// HasWaitingForDestinations reports whether a waiting job other than
 	// excludeJobID needs any of the given destinations, so a new job queues
 	// behind it instead of overtaking it.

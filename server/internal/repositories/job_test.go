@@ -723,3 +723,38 @@ func TestMarkRunningJobsInterrupted_ClosesChildRows(t *testing.T) {
 		})
 	}
 }
+
+// TestListPendingBefore: only pending jobs last updated before the cutoff are
+// returned, oldest first (issue #325).
+func TestListPendingBefore(t *testing.T) {
+	gormDB := newTestDB(t)
+	repo := NewJobRepository(gormDB)
+	f := newJobFixture(t, gormDB)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	newJob := func(status string, updatedAt time.Time) *db.Job {
+		t.Helper()
+		j := &db.Job{PolicyID: &f.policyID, AgentID: f.agentID, Status: status}
+		if err := repo.Create(ctx, j); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := gormDB.Model(&db.Job{}).Where("id = ?", j.ID).UpdateColumn("updated_at", updatedAt).Error; err != nil {
+			t.Fatalf("backdate: %v", err)
+		}
+		return j
+	}
+	older := newJob("pending", now.Add(-48*time.Hour))
+	old := newJob("pending", now.Add(-25*time.Hour))
+	newJob("pending", now.Add(-time.Hour))
+	newJob("running", now.Add(-48*time.Hour))
+	newJob("waiting", now.Add(-48*time.Hour))
+
+	got, err := repo.ListPendingBefore(ctx, now.Add(-24*time.Hour), 10)
+	if err != nil {
+		t.Fatalf("ListPendingBefore: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != older.ID || got[1].ID != old.ID {
+		t.Errorf("ListPendingBefore = %v, want [older, old]", got)
+	}
+}

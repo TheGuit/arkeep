@@ -866,3 +866,32 @@ func TestRunJob_SkippedTickAdvancesNextRunAt(t *testing.T) {
 		t.Errorf("LastRunAt = %v, want it left at %v: a skipped tick is not a run", stored.LastRunAt, past)
 	}
 }
+
+// TestRunJob_AfterPendingTimeout is the scenario of issue #325: a daily backup
+// whose job stays pending (agent offline) used to skip every later run in
+// silence. Once the queue timeout fails it, the next tick creates a new job.
+func TestRunJob_AfterPendingTimeout(t *testing.T) {
+	q := newQueueFixture(t)
+	ctx := context.Background()
+
+	stuck := &db.Job{PolicyID: &q.f.policy.ID, AgentID: q.f.agentID, Type: "backup", Status: "pending"}
+	if err := q.jobs.Create(ctx, stuck); err != nil {
+		t.Fatalf("create pending job: %v", err)
+	}
+	if job, err := q.s.runJob(q.f.policy, nil); err != nil || job != nil {
+		t.Fatalf("runJob with a pending job = %v, %v; want the tick skipped", job, err)
+	}
+
+	if err := q.gdb.Model(&db.Job{}).Where("id = ?", stuck.ID).UpdateColumn("updated_at", time.Now().UTC().Add(-25*time.Hour)).Error; err != nil {
+		t.Fatalf("backdate job: %v", err)
+	}
+	q.s.queue.Drain(ctx)
+	if got := q.status(stuck); got != "failed" {
+		t.Fatalf("stuck job status = %q, want \"failed\" after the timeout", got)
+	}
+
+	job, err := q.s.runJob(q.f.policy, nil)
+	if err != nil || job == nil {
+		t.Fatalf("runJob after the timeout = %v, %v; want a new job", job, err)
+	}
+}

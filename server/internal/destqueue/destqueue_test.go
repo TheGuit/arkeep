@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/arkeep-io/arkeep/server/internal/db"
+	"github.com/arkeep-io/arkeep/server/internal/notification"
 	"github.com/arkeep-io/arkeep/server/internal/repositories"
 )
 
@@ -20,6 +23,39 @@ import (
 type agentSet map[string]bool
 
 func (a agentSet) IsConnected(agentID string) bool { return a[agentID] }
+
+func (a agentSet) SendCancel(string, string) error { return nil }
+
+// cancellingAgents is an agentSet that records the cancels it is sent.
+type cancellingAgents struct {
+	agentSet
+	mu        sync.Mutex
+	cancelled []string
+}
+
+func (c *cancellingAgents) SendCancel(_, jobID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cancelled = append(c.cancelled, jobID)
+	return nil
+}
+
+// failedNotifier is a notification.Service that reports each job-failed
+// notification on a channel: the queue sends them asynchronously.
+type failedNotifier struct{ failed chan string }
+
+func (n *failedNotifier) NotifyJobSucceeded(context.Context, notification.JobSubject) error {
+	return nil
+}
+
+func (n *failedNotifier) NotifyJobFailed(_ context.Context, _ notification.JobSubject, errMsg string) error {
+	n.failed <- errMsg
+	return nil
+}
+
+func (n *failedNotifier) NotifyAgentOffline(context.Context, uuid.UUID, string) error { return nil }
+
+func (n *failedNotifier) NotifyAgentOnline(context.Context, uuid.UUID, string) error { return nil }
 
 // fakeStarter claims the job's queued destinations through admit and records
 // what it started. sendErr simulates a dispatch failure after admission.
@@ -279,5 +315,99 @@ func TestEnqueue_ReleasesHeldGates(t *testing.T) {
 	}
 	if got.BusyJobID != nil {
 		t.Errorf("BusyJobID = %v, want nil once the job is queued", got.BusyJobID)
+	}
+}
+
+// pendingJob creates a pending job of agent over d, last updated at updatedAt.
+func (e *env) pendingJob(agent *db.Agent, status string, d *db.Destination, updatedAt time.Time) *db.Job {
+	e.t.Helper()
+	ctx := context.Background()
+	j := &db.Job{AgentID: agent.ID, Type: "retention", Status: status}
+	if err := e.jobs.Create(ctx, j); err != nil {
+		e.t.Fatalf("create job: %v", err)
+	}
+	if err := e.jobs.CreateDestination(ctx, &db.JobDestination{JobID: j.ID, DestinationID: d.ID, Status: "pending"}); err != nil {
+		e.t.Fatalf("create job destination: %v", err)
+	}
+	if err := e.gdb.Model(&db.Job{}).Where("id = ?", j.ID).UpdateColumn("updated_at", updatedAt).Error; err != nil {
+		e.t.Fatalf("backdate job: %v", err)
+	}
+	return j
+}
+
+// Issue #325: a job still pending after the queue timeout — its agent was
+// offline, or never started it — is failed and reported, the agent told to
+// drop it, and its destination released. Drain does this with no job waiting.
+func TestDrain_StalePendingFails(t *testing.T) {
+	e := newEnv(t)
+	online := e.agent("online")
+	offline := e.agent("offline")
+	d := e.dest("d")
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-25 * time.Hour)
+
+	sent := e.pendingJob(online, "pending", d, old)
+	if ok, err := e.dests.TryAcquireBusyAll(ctx, []uuid.UUID{d.ID}, sent.ID); err != nil || !ok {
+		t.Fatalf("TryAcquireBusyAll: %v %v", ok, err)
+	}
+	unsent := e.pendingJob(offline, "pending", e.dest("d2"), old)
+	recent := e.pendingJob(online, "pending", e.dest("d3"), time.Now().UTC().Add(-time.Hour))
+	running := e.pendingJob(online, "running", e.dest("d4"), old)
+
+	agents := &cancellingAgents{agentSet: agentSet{online.ID.String(): true}}
+	notifier := &failedNotifier{failed: make(chan string, 4)}
+	q := New(e.jobs, e.dests, e.settings, agents, zap.NewNop())
+	q.SetNotificationService(notifier)
+	q.Drain(ctx)
+
+	for _, j := range []*db.Job{sent, unsent} {
+		got, err := e.jobs.GetByID(ctx, j.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if got.Status != "failed" || got.Error != PendingTimeoutError || got.EndedAt == nil {
+			t.Errorf("stale pending job = %s %q (ended %v), want failed %q with an end time", got.Status, got.Error, got.EndedAt, PendingTimeoutError)
+		}
+	}
+	for _, j := range []*db.Job{recent} {
+		if got := e.status(j); got != "pending" {
+			t.Errorf("recent pending job status = %q, want \"pending\"", got)
+		}
+	}
+	if got := e.status(running); got != "running" {
+		t.Errorf("running job status = %q, want \"running\"", got)
+	}
+	if !slices.Equal(agents.cancelled, []string{sent.ID.String()}) {
+		t.Errorf("cancels sent = %v, want only the connected agent's job %s", agents.cancelled, sent.ID)
+	}
+	if got, err := e.dests.GetByID(ctx, d.ID); err != nil || got.BusyJobID != nil {
+		t.Errorf("destination holder = %v (%v), want released", got.BusyJobID, err)
+	}
+	for range 2 {
+		select {
+		case msg := <-notifier.failed:
+			if msg != PendingTimeoutError {
+				t.Errorf("notified error = %q, want %q", msg, PendingTimeoutError)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("job failed notification not sent")
+		}
+	}
+}
+
+// A timeout of 0 lets a pending job wait for its agent indefinitely.
+func TestDrain_PendingTimeoutDisabled(t *testing.T) {
+	e := newEnv(t)
+	agent := e.agent("a")
+	ctx := context.Background()
+	job := e.pendingJob(agent, "pending", e.dest("d"), time.Now().UTC().AddDate(0, -1, 0))
+	if err := e.settings.Set(ctx, KeyTimeoutMinutes, db.EncryptedString("0")); err != nil {
+		t.Fatalf("set timeout: %v", err)
+	}
+
+	e.queue(agentSet{}, &fakeStarter{t: t, jobs: e.jobs, dests: e.dests}).Drain(ctx)
+
+	if got := e.status(job); got != "pending" {
+		t.Errorf("job status = %q, want \"pending\" with the timeout disabled", got)
 	}
 }

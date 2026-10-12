@@ -729,6 +729,21 @@ func (r *gormJobRepository) HasPendingJob(ctx context.Context, policyID uuid.UUI
 	return count > 0, nil
 }
 
+// ListPendingBefore returns up to limit jobs still "pending" whose status last
+// changed before cutoff, oldest first: jobs whose agent was offline, or never
+// started them, for longer than the queue timeout (issue #325).
+func (r *gormJobRepository) ListPendingBefore(ctx context.Context, cutoff time.Time, limit int) ([]db.Job, error) {
+	var jobs []db.Job
+	if err := r.db.WithContext(ctx).
+		Where("status = ? AND updated_at < ?", "pending", cutoff).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&jobs).Error; err != nil {
+		return nil, fmt.Errorf("jobs: list pending before: %w", err)
+	}
+	return jobs, nil
+}
+
 // ListWaiting returns up to limit jobs in status "waiting", oldest first: the
 // destination queue is FIFO (issue #285).
 func (r *gormJobRepository) ListWaiting(ctx context.Context, limit int) ([]db.Job, error) {
