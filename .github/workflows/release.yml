@@ -56,11 +56,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Collects the GitHub logins of everyone who authored a commit since the
-      # previous tag (bots excluded) and exposes them to GoReleaser as
-      # CONTRIBUTORS, rendered in the release notes footer. Commits whose email
-      # is not linked to a GitHub account have no login and are skipped.
-      - name: Collect contributors
+      # Collects the GitHub logins of everyone who authored their first commit
+      # since the previous tag (bots excluded) and exposes them to GoReleaser
+      # as CONTRIBUTORS, rendered in the release notes footer. A login with any
+      # commit reachable from the previous tag is not a first-time contributor.
+      # Commits whose email is not linked to a GitHub account have no login and
+      # are skipped.
+      - name: Collect first-time contributors
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -73,9 +75,12 @@ jobs:
               --jq '.commits[].author.login // empty' \
             | { grep -v -e '\[bot\]$' -e '^dependabot$' || true; } \
             | sort -fu \
-            | sed 's/^/@/' \
+            | while read -r login; do
+                n=$(gh api "repos/${GITHUB_REPOSITORY}/commits?sha=${prev}&author=${login}&per_page=1" --jq 'length')
+                if [ "$n" = "0" ]; then echo "@${login}"; fi
+              done \
             | paste -sd ' ' -)
-          echo "Contributors since ${prev}: ${contributors}"
+          echo "First-time contributors since ${prev}: ${contributors}"
           echo "CONTRIBUTORS=${contributors}" >> "$GITHUB_ENV"
 
       - name: Run GoReleaser

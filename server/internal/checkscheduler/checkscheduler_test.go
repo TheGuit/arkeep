@@ -246,12 +246,8 @@ func TestTriggerNow_Success(t *testing.T) {
 				t.Errorf("payload repo password = %q, want the attached policy's", p.RepoPassword)
 			}
 
-			gotDest, err := e.dests.GetByID(ctx, dest.ID)
-			if err != nil {
-				t.Fatalf("GetByID: %v", err)
-			}
-			if gotDest.BusyJobID == nil || *gotDest.BusyJobID != job.ID {
-				t.Errorf("destination BusyJobID = %v, want %s (busy gate held by the check)", gotDest.BusyJobID, job.ID)
+			if locks, err := e.dests.ListLocks(ctx, []uuid.UUID{dest.ID}); err != nil || len(locks) != 1 || locks[0].JobID != job.ID {
+				t.Errorf("destination locks = %+v, %v; want only %s (busy gate held by the check)", locks, err, job.ID)
 			}
 		})
 	}
@@ -270,12 +266,12 @@ func TestTriggerNow_DestinationBusy_Queues(t *testing.T) {
 		d.RepoPassword = "imported-pass"
 	})
 
-	// Simulate an in-flight backup already holding the gate.
+	// Simulate an in-flight backup already holding the destination (shared).
 	holder := &db.Job{AgentID: agent.ID, Type: "backup", Status: "running"}
 	if err := e.jobs.Create(ctx, holder); err != nil {
 		t.Fatalf("create holder job: %v", err)
 	}
-	if acquired, err := e.dests.TryAcquireBusy(ctx, dest.ID, holder.ID); err != nil || !acquired {
+	if acquired, err := e.dests.TryAcquireBusyAll(ctx, []uuid.UUID{dest.ID}, holder.ID, db.LockShared); err != nil || !acquired {
 		t.Fatalf("TryAcquireBusy (holder): acquired=%v err=%v", acquired, err)
 	}
 

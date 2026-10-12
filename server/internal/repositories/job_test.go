@@ -478,7 +478,7 @@ func TestMarkRunningJobsInterrupted_ReleasesDestinationBusyGate(t *testing.T) {
 	if err := jobRepo.Create(ctx, running); err != nil {
 		t.Fatalf("Create running job: %v", err)
 	}
-	acquired, err := destRepo.TryAcquireBusy(ctx, f.destID, running.ID)
+	acquired, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{f.destID}, running.ID, db.LockExclusive)
 	if err != nil || !acquired {
 		t.Fatalf("TryAcquireBusy: acquired=%v err=%v", acquired, err)
 	}
@@ -487,12 +487,8 @@ func TestMarkRunningJobsInterrupted_ReleasesDestinationBusyGate(t *testing.T) {
 		t.Fatalf("MarkRunningJobsInterrupted: %v", err)
 	}
 
-	dest, err := destRepo.GetByID(ctx, f.destID)
-	if err != nil {
-		t.Fatalf("GetByID: %v", err)
-	}
-	if dest.BusyJobID != nil {
-		t.Errorf("destination BusyJobID = %v after MarkRunningJobsInterrupted, want nil (gate must be released)", dest.BusyJobID)
+	if got := busyHolder(t, destRepo, f.destID); got != "" {
+		t.Errorf("destination holder = %q after MarkRunningJobsInterrupted, want nil (gate must be released)", got)
 	}
 
 	// The now-free destination must be acquirable by a different job.
@@ -500,7 +496,7 @@ func TestMarkRunningJobsInterrupted_ReleasesDestinationBusyGate(t *testing.T) {
 	if err := jobRepo.Create(ctx, other); err != nil {
 		t.Fatalf("Create other job: %v", err)
 	}
-	acquired, err = destRepo.TryAcquireBusy(ctx, f.destID, other.ID)
+	acquired, err = destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{f.destID}, other.ID, db.LockExclusive)
 	if err != nil {
 		t.Fatalf("TryAcquireBusy (other): %v", err)
 	}
@@ -539,7 +535,7 @@ func TestMarkRunningJobsInterrupted_RecoversPendingMaintenanceJobs(t *testing.T)
 				if err := jobRepo.CreateDestination(ctx, &db.JobDestination{JobID: maint.ID, DestinationID: f.destID, Status: "pending"}); err != nil {
 					t.Fatalf("CreateDestination: %v", err)
 				}
-				if acquired, err := destRepo.TryAcquireBusy(ctx, f.destID, maint.ID); err != nil || !acquired {
+				if acquired, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{f.destID}, maint.ID, db.LockExclusive); err != nil || !acquired {
 					t.Fatalf("TryAcquireBusy: acquired=%v err=%v", acquired, err)
 				}
 				backup := &db.Job{PolicyID: &f.policyID, AgentID: f.agentID, Type: "backup", Status: "pending"}
@@ -562,12 +558,8 @@ func TestMarkRunningJobsInterrupted_RecoversPendingMaintenanceJobs(t *testing.T)
 				if stored.Status != "interrupted" {
 					t.Errorf("%s job status = %q, want \"interrupted\"", jobType, stored.Status)
 				}
-				dest, err := destRepo.GetByID(ctx, f.destID)
-				if err != nil {
-					t.Fatalf("GetByID(destination): %v", err)
-				}
-				if dest.BusyJobID != nil {
-					t.Errorf("destination BusyJobID = %v, want nil (gate must be released)", dest.BusyJobID)
+				if got := busyHolder(t, destRepo, f.destID); got != "" {
+					t.Errorf("destination holder = %q, want nil (gate must be released)", got)
 				}
 				untouched, err := jobRepo.GetByID(ctx, backup.ID)
 				if err != nil {
@@ -578,6 +570,55 @@ func TestMarkRunningJobsInterrupted_RecoversPendingMaintenanceJobs(t *testing.T)
 				}
 			})
 		}
+	}
+}
+
+// TestMarkRunningJobsInterrupted_ReleasesPendingBackupGates is the regression
+// case for issue #319: a backup sent to an agent that vanished before reporting
+// "running" stays pending, waiting for DispatchPending, and must not keep its
+// destinations busy meanwhile — every other job on them would wait for an agent
+// that may stay away for days. The job itself is left pending: it re-claims its
+// destinations when it is re-sent on reconnect.
+func TestMarkRunningJobsInterrupted_ReleasesPendingBackupGates(t *testing.T) {
+	sweeps := map[string]func(JobRepository, context.Context, uuid.UUID) (int64, error){
+		"all agents": func(r JobRepository, ctx context.Context, _ uuid.UUID) (int64, error) {
+			return r.MarkRunningJobsInterrupted(ctx, "server restarted")
+		},
+		"one agent": func(r JobRepository, ctx context.Context, agentID uuid.UUID) (int64, error) {
+			return r.MarkRunningJobsInterruptedForAgent(ctx, agentID, "agent disconnected")
+		},
+	}
+	for name, sweep := range sweeps {
+		t.Run(name, func(t *testing.T) {
+			gormDB := newTestDB(t)
+			jobRepo := NewJobRepository(gormDB)
+			destRepo := NewDestinationRepository(gormDB)
+			f := newJobFixture(t, gormDB)
+			ctx := context.Background()
+
+			backup := &db.Job{PolicyID: &f.policyID, AgentID: f.agentID, Type: "backup", Status: "pending"}
+			if err := jobRepo.Create(ctx, backup); err != nil {
+				t.Fatalf("Create backup job: %v", err)
+			}
+			if acquired, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{f.destID}, backup.ID, db.LockShared); err != nil || !acquired {
+				t.Fatalf("TryAcquireBusy: acquired=%v err=%v", acquired, err)
+			}
+
+			if _, err := sweep(jobRepo, ctx, f.agentID); err != nil {
+				t.Fatalf("sweep: %v", err)
+			}
+
+			if got := busyHolder(t, destRepo, f.destID); got != "" {
+				t.Errorf("destination holder = %q, want nil: a pending backup of a gone agent must not hold it", got)
+			}
+			stored, err := jobRepo.GetByID(ctx, backup.ID)
+			if err != nil {
+				t.Fatalf("GetByID(backup): %v", err)
+			}
+			if stored.Status != "pending" {
+				t.Errorf("backup status = %q, want it left at \"pending\" for DispatchPending", stored.Status)
+			}
+		})
 	}
 }
 
@@ -649,5 +690,112 @@ func TestHasJobForPolicyAfter(t *testing.T) {
 	}
 	if !has {
 		t.Error("did not report the newer job")
+	}
+}
+
+// TestMarkRunningJobsInterrupted_ClosesChildRows guards against an interrupted
+// job leaving its per-tag retention rows and per-command rows unfinished: they
+// would show as still pending or running forever under a job that is over.
+// job_retention_tags has no "interrupted" status, so an unfinished sweep is
+// closed out as "failed" with the job's error.
+func TestMarkRunningJobsInterrupted_ClosesChildRows(t *testing.T) {
+	sweeps := map[string]func(JobRepository, context.Context, uuid.UUID) (int64, error){
+		"all agents": func(r JobRepository, ctx context.Context, _ uuid.UUID) (int64, error) {
+			return r.MarkRunningJobsInterrupted(ctx, "server restarted")
+		},
+		"one agent": func(r JobRepository, ctx context.Context, agentID uuid.UUID) (int64, error) {
+			return r.MarkRunningJobsInterruptedForAgent(ctx, agentID, "server restarted")
+		},
+	}
+	for name, sweep := range sweeps {
+		t.Run(name, func(t *testing.T) {
+			gormDB := newTestDB(t)
+			repo := NewJobRepository(gormDB)
+			f := newJobFixture(t, gormDB)
+			ctx := context.Background()
+
+			retention := &db.Job{AgentID: f.agentID, Type: "retention", Status: "running"}
+			if err := repo.Create(ctx, retention); err != nil {
+				t.Fatalf("Create retention job: %v", err)
+			}
+			for _, tag := range []struct{ tag, status string }{
+				{"policy:a", "succeeded"},
+				{"policy:b", "running"},
+				{"policy:c", "pending"},
+			} {
+				if err := repo.CreateRetentionTag(ctx, &db.JobRetentionTag{JobID: retention.ID, DestinationID: f.destID, Tag: tag.tag, Status: tag.status}); err != nil {
+					t.Fatalf("CreateRetentionTag(%s): %v", tag.tag, err)
+				}
+			}
+
+			backup := &db.Job{PolicyID: &f.policyID, AgentID: f.agentID, Type: "backup", Status: "running"}
+			if err := repo.Create(ctx, backup); err != nil {
+				t.Fatalf("Create backup job: %v", err)
+			}
+			if err := gormDB.Create(&db.JobDestinationCommand{JobID: backup.ID, DestinationID: f.destID, SourceName: "pgdump", Status: "running"}).Error; err != nil {
+				t.Fatalf("create command row: %v", err)
+			}
+
+			if _, err := sweep(repo, ctx, f.agentID); err != nil {
+				t.Fatalf("sweep: %v", err)
+			}
+
+			tags, err := repo.ListRetentionTagsByJob(ctx, retention.ID)
+			if err != nil {
+				t.Fatalf("ListRetentionTagsByJob: %v", err)
+			}
+			want := map[string]string{"policy:a": "succeeded", "policy:b": "failed", "policy:c": "failed"}
+			for _, tg := range tags {
+				if tg.Status != want[tg.Tag] {
+					t.Errorf("tag %s status = %q, want %q", tg.Tag, tg.Status, want[tg.Tag])
+				}
+				if tg.Status == "failed" && (tg.Error != "server restarted" || tg.EndedAt == nil) {
+					t.Errorf("tag %s error = %q, EndedAt = %v; want the job's error and an end time", tg.Tag, tg.Error, tg.EndedAt)
+				}
+			}
+
+			cmds, err := repo.ListDestinationCommandsByJob(ctx, backup.ID)
+			if err != nil {
+				t.Fatalf("ListDestinationCommandsByJob: %v", err)
+			}
+			if len(cmds) != 1 || cmds[0].Status != "interrupted" {
+				t.Errorf("command rows = %+v, want a single \"interrupted\" row", cmds)
+			}
+		})
+	}
+}
+
+// TestListPendingBefore: only pending jobs last updated before the cutoff are
+// returned, oldest first (issue #325).
+func TestListPendingBefore(t *testing.T) {
+	gormDB := newTestDB(t)
+	repo := NewJobRepository(gormDB)
+	f := newJobFixture(t, gormDB)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	newJob := func(status string, updatedAt time.Time) *db.Job {
+		t.Helper()
+		j := &db.Job{PolicyID: &f.policyID, AgentID: f.agentID, Status: status}
+		if err := repo.Create(ctx, j); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := gormDB.Model(&db.Job{}).Where("id = ?", j.ID).UpdateColumn("updated_at", updatedAt).Error; err != nil {
+			t.Fatalf("backdate: %v", err)
+		}
+		return j
+	}
+	older := newJob("pending", now.Add(-48*time.Hour))
+	old := newJob("pending", now.Add(-25*time.Hour))
+	newJob("pending", now.Add(-time.Hour))
+	newJob("running", now.Add(-48*time.Hour))
+	newJob("waiting", now.Add(-48*time.Hour))
+
+	got, err := repo.ListPendingBefore(ctx, now.Add(-24*time.Hour), 10)
+	if err != nil {
+		t.Fatalf("ListPendingBefore: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != older.ID || got[1].ID != old.ID {
+		t.Errorf("ListPendingBefore = %v, want [older, old]", got)
 	}
 }

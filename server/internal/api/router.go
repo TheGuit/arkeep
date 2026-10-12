@@ -2,6 +2,7 @@ package api
 
 import (
 	"database/sql"
+	"net/netip"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -83,6 +84,14 @@ type RouterConfig struct {
 	// production to prevent Host header injection into reset links.
 	PublicBaseURL string
 
+	// MetricsToken, when set, must be presented as a bearer token to read
+	// /metrics. When empty, /metrics is public.
+	MetricsToken string
+
+	// TrustedProxies are the networks whose X-Forwarded-For is believed when
+	// resolving the client address (see RealIP). Nil trusts no proxy.
+	TrustedProxies []netip.Prefix
+
 	// AutoCerts is the auto-generated PKI used for gRPC mTLS enrollment.
 	AutoCerts *grpccerts.AutoCerts
 
@@ -107,6 +116,8 @@ type RouterConfig struct {
 func NewRouter(cfg RouterConfig) *chi.Mux {
 	r := chi.NewRouter()
 
+	// First, so the request log, rate limits and audit see the client address.
+	r.Use(RealIP(cfg.TrustedProxies, cfg.Logger))
 	r.Use(middleware.RequestID)
 	r.Use(RequestLogger(cfg.Logger))
 	r.Use(middleware.Recoverer)
@@ -129,7 +140,7 @@ func NewRouter(cfg RouterConfig) *chi.Mux {
 	policyHandler := NewPolicyHandler(cfg.Policies, cfg.Agents, cfg.Destinations, cfg.Scheduler, cfg.Pinger, cfg.Audit, cfg.Logger)
 	jobHandler := NewJobHandler(cfg.Jobs, cfg.AgentManager, cfg.Hub, cfg.Pinger, cfg.Queue, cfg.Logger)
 	snapshotHandler := NewSnapshotHandler(cfg.Snapshots, cfg.Destinations, cfg.Policies, cfg.Jobs, cfg.AgentManager, cfg.Audit, cfg.Logger)
-	userHandler := NewUserHandler(cfg.Users, cfg.Audit, cfg.Logger)
+	userHandler := NewUserHandler(cfg.Users, cfg.RefreshTokens, cfg.Audit, cfg.Logger)
 	notificationHandler := NewNotificationHandler(cfg.Notifications, cfg.Logger)
 	settingsHandler := NewSettingsHandler(cfg.OIDCProviders, cfg.Settings, cfg.Audit, cfg.LogRetention, cfg.Logger)
 	wsHandler := NewWSHandler(cfg.Hub, cfg.AuthService, cfg.Logger)
@@ -141,9 +152,9 @@ func NewRouter(cfg RouterConfig) *chi.Mux {
 	r.Get("/health/live", healthHandler.Live)
 	r.Get("/health/ready", healthHandler.Ready)
 
-	// Prometheus metrics endpoint — unauthenticated (protect at network level
-	// or via a reverse proxy in production).
-	r.Mount("/metrics", metrics.Handler())
+	// Prometheus metrics endpoint — public unless a metrics token is set
+	// (SEC-36); otherwise protect it at network level or via a reverse proxy.
+	r.Mount("/metrics", requireBearer(cfg.MetricsToken, metrics.Handler()))
 
 	// OIDC callback — registered at the root so the redirect URI registered
 	// with identity providers does not carry the /api/v1 prefix.
@@ -153,17 +164,24 @@ func NewRouter(cfg RouterConfig) *chi.Mux {
 
 		// --- Public routes ---
 		r.Group(func(r chi.Router) {
-			// Login and refresh are rate-limited to 5 requests per minute per IP
-			// to prevent brute-force attacks on credentials.
+			// Login is rate-limited to 5 requests per minute per IP to prevent
+			// brute-force attacks on credentials. Refresh has its own budget:
+			// every open tab refreshes on its own, and sharing the login bucket
+			// let a few tabs lock their user out of logging in (SEC-19).
 			loginLimiter := NewRateLimiter(5, time.Minute)
 			r.With(RateLimit(loginLimiter)).Post("/auth/login", authHandler.Login)
-			r.With(RateLimit(loginLimiter)).Post("/auth/refresh", authHandler.Refresh)
+			r.With(RateLimit(NewRateLimiter(30, time.Minute))).Post("/auth/refresh", authHandler.Refresh)
 
 			// Second step of a two-factor login. It gets its own limiter rather
 			// than sharing loginLimiter's cumulative 5/min budget, because a
 			// legitimate user may retry a mistyped code a few times.
 			r.With(RateLimit(NewRateLimiter(10, time.Minute))).
 				Post("/auth/login/2fa", authHandler.LoginTwoFactor)
+
+			// Logout is public so that a session whose access token already
+			// expired can still revoke its refresh token (SEC-13).
+			r.With(RateLimit(NewRateLimiter(20, time.Minute))).
+				Post("/auth/logout", authHandler.Logout)
 
 			// OIDC flow — public because the user is not yet authenticated.
 			// /providers lists enabled providers for the login page SSO buttons.
@@ -208,8 +226,6 @@ func NewRouter(cfg RouterConfig) *chi.Mux {
 			r.Get("/dashboard", dashboardHandler.Get)
 			r.Get("/version", versionHandler.Get)
 
-			r.Post("/auth/logout", authHandler.Logout)
-
 			r.Get("/users/me", userHandler.GetMe)
 			r.Patch("/users/me", userHandler.UpdateMe)
 
@@ -227,6 +243,7 @@ func NewRouter(cfg RouterConfig) *chi.Mux {
 			r.Get("/agents/{id}", agentHandler.GetByID)
 			r.With(RequireRole("admin")).Patch("/agents/{id}", agentHandler.Update)
 			r.With(RequireRole("admin")).Delete("/agents/{id}", agentHandler.Delete)
+			r.With(RequireRole("admin")).Post("/agents/{id}/reset-identity", agentHandler.ResetIdentity)
 			r.With(RequireRole("admin")).Get("/agents/{id}/volumes", agentHandler.ListVolumes)
 
 			// Destinations

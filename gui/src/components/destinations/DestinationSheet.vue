@@ -90,12 +90,15 @@ const configSchemas: Record<DestType, z.ZodObject<any>> = {
     }),
     sftp: z.object({
         host: z.string().min(1, 'Host is required'),
-        port: z.string().optional(),
+        port: z.string().regex(/^\s*(\d{1,5})?\s*$/, 'Port must be a number')
+            .refine((p) => !p.trim() || (Number(p) >= 1 && Number(p) <= 65535), 'Port must be between 1 and 65535')
+            .optional(),
         user: z.string().min(1, 'Username is required'),
         path: z.string().min(1, 'Path is required'),
     }),
     rest: z.object({
-        url: z.string().url('Must be a valid URL'),
+        url: z.string().url('Must be a valid URL')
+            .refine((u) => /^https?:\/\//i.test(u), 'Must be an http or https URL'),
     }),
     rclone: z.object({
         remote: z.string().min(1, 'Remote name is required'),
@@ -376,8 +379,11 @@ function buildConfigAndCreds(): { config: Record<string, string>; creds: Record<
         case 's3':
             return {
                 config: {
-                    bucket: s3Bucket.value,
-                    endpoint: s3Endpoint.value,
+                    // Strip the slashes the server joins these with - an
+                    // endpoint saved as "https://host/" used to produce an
+                    // empty bucket name in the restic repository URL.
+                    bucket: s3Bucket.value.trim().replace(/^\/+|\/+$/g, ''),
+                    endpoint: s3Endpoint.value.trim().replace(/\/+$/, ''),
                     region: s3Region.value,
                     prefix: s3Prefix.value,
                 },

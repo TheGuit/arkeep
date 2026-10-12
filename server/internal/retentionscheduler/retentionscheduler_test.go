@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/metadata"
 	gormlogger "gorm.io/gorm/logger"
@@ -282,12 +283,8 @@ func TestTriggerNow_Success(t *testing.T) {
 		t.Errorf("payload repo password = %q, want the attached policy's", payload.RepoPassword)
 	}
 
-	gotDest, err := e.dests.GetByID(context.Background(), dest.ID)
-	if err != nil {
-		t.Fatalf("GetByID: %v", err)
-	}
-	if gotDest.BusyJobID == nil || *gotDest.BusyJobID != job.ID {
-		t.Errorf("destination BusyJobID = %v, want %s (busy gate should be held by the dispatched job)", gotDest.BusyJobID, job.ID)
+	if locks, err := e.dests.ListLocks(context.Background(), []uuid.UUID{dest.ID}); err != nil || len(locks) != 1 || locks[0].JobID != job.ID {
+		t.Errorf("destination locks = %+v, %v; want only %s (busy gate should be held by the dispatched job)", locks, err, job.ID)
 	}
 }
 
@@ -309,12 +306,12 @@ func TestTriggerNow_DestinationBusy_Queues(t *testing.T) {
 		t.Fatalf("attach policy: %v", err)
 	}
 
-	// Simulate an in-flight backup already holding the gate.
+	// Simulate an in-flight backup already holding the destination (shared).
 	holder := &db.Job{AgentID: agent.ID, Type: "backup", Status: "running"}
 	if err := e.jobs.Create(ctx, holder); err != nil {
 		t.Fatalf("create holder job: %v", err)
 	}
-	if acquired, err := e.dests.TryAcquireBusy(ctx, dest.ID, holder.ID); err != nil || !acquired {
+	if acquired, err := e.dests.TryAcquireBusyAll(ctx, []uuid.UUID{dest.ID}, holder.ID, db.LockShared); err != nil || !acquired {
 		t.Fatalf("TryAcquireBusy (holder): acquired=%v err=%v", acquired, err)
 	}
 
@@ -335,12 +332,8 @@ func TestTriggerNow_DestinationBusy_Queues(t *testing.T) {
 		t.Errorf("retention tags = %d, want none before the sweep starts", len(tags))
 	}
 	// The gate must still be held by the original holder, not stolen or cleared.
-	gotDest, err := e.dests.GetByID(ctx, dest.ID)
-	if err != nil {
-		t.Fatalf("GetByID: %v", err)
-	}
-	if gotDest.BusyJobID == nil || *gotDest.BusyJobID != holder.ID {
-		t.Errorf("destination BusyJobID = %v, want %s (the original holder)", gotDest.BusyJobID, holder.ID)
+	if locks, err := e.dests.ListLocks(ctx, []uuid.UUID{dest.ID}); err != nil || len(locks) != 1 || locks[0].JobID != holder.ID {
+		t.Errorf("destination locks = %+v, %v; want only %s (the original holder)", locks, err, holder.ID)
 	}
 
 	// A second trigger must not queue a duplicate sweep.
@@ -364,11 +357,7 @@ func TestTriggerNow_DestinationBusy_Queues(t *testing.T) {
 	if tags, _ := e.jobs.ListRetentionTagsByJob(ctx, job.ID); len(tags) != 1 {
 		t.Errorf("retention tags after drain = %d, want 1", len(tags))
 	}
-	gotDest, err = e.dests.GetByID(ctx, dest.ID)
-	if err != nil {
-		t.Fatalf("GetByID: %v", err)
-	}
-	if gotDest.BusyJobID == nil || *gotDest.BusyJobID != job.ID {
-		t.Errorf("destination BusyJobID = %v, want %s (held by the started sweep)", gotDest.BusyJobID, job.ID)
+	if locks, err := e.dests.ListLocks(ctx, []uuid.UUID{dest.ID}); err != nil || len(locks) != 1 || locks[0].JobID != job.ID {
+		t.Errorf("destination locks = %+v, %v; want only %s (held by the started sweep)", locks, err, job.ID)
 	}
 }

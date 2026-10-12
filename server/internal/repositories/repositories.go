@@ -152,6 +152,17 @@ type AgentRepository interface {
 	List(ctx context.Context, opts ListOptions) ([]db.Agent, int64, error)
 	ListFiltered(ctx context.Context, filter AgentFilter, opts ListOptions) ([]db.Agent, int64, error)
 
+	// GetByCertFingerprint returns the live agent bound to the given client
+	// certificate fingerprint, or ErrNotFound.
+	GetByCertFingerprint(ctx context.Context, fingerprint string) (*db.Agent, error)
+	// BindCertFingerprint binds an unbound agent to a client certificate.
+	// Returns false when the agent is already bound (or does not exist), so
+	// two certificates racing to bind the same agent cannot both win.
+	BindCertFingerprint(ctx context.Context, id uuid.UUID, fingerprint string) (bool, error)
+	// ResetCertFingerprint unbinds an agent: the next certificate that
+	// registers as it binds it again.
+	ResetCertFingerprint(ctx context.Context, id uuid.UUID) error
+
 	// TotalCount returns the count of all non-deleted agents in the database.
 	// Used by telemetry to report the registered agent count regardless of
 	// whether agents are currently connected.
@@ -206,30 +217,30 @@ type DestinationRepository interface {
 	// recent integrity check job.
 	UpdateLastCheck(ctx context.Context, destinationID, jobID uuid.UUID, status string, at time.Time) error
 
-	// Busy gate (issue #130): serializes backup/retention operations against
-	// a shared destination's repository server-side, instead of relying only
-	// on restic's own lock file (see agent/internal/restic/wrapper.go's
-	// withLockRetry, which only recovers a stale lock from a dead process).
+	// Destination locks (issues #130, #319): the server-side gate on a
+	// destination's repository, instead of relying only on restic's own lock
+	// file (see agent/internal/restic/wrapper.go's withLockRetry, which only
+	// recovers a stale lock from a dead process). Backups hold their
+	// destinations shared and run side by side; a retention sweep or an
+	// integrity check holds its destination exclusive.
 	//
-	// TryAcquireBusy claims the destination for jobID if not already busy.
-	// A false, nil-error return means another job already holds it — callers
-	// treat that as "skip/defer this dispatch", not a failure.
-	TryAcquireBusy(ctx context.Context, destinationID, jobID uuid.UUID) (bool, error)
-	// TryAcquireBusyAll claims every listed destination for jobID in one
-	// transaction, or none of them (issue #285): a job never holds part of
-	// what it needs while waiting for the rest.
-	TryAcquireBusyAll(ctx context.Context, destinationIDs []uuid.UUID, jobID uuid.UUID) (bool, error)
-	// ReleaseBusy clears the gate only if jobID is still the current holder,
-	// so a stale/duplicate release can never clear a newer lock.
+	// TryAcquireBusyAll claims every listed destination for jobID in mode
+	// (db.LockShared, db.LockExclusive) in one transaction, or none of them
+	// (issue #285): a job never holds part of what it needs while waiting for
+	// the rest. A false, nil-error return means a conflicting hold exists —
+	// callers queue the job, it is not a failure.
+	TryAcquireBusyAll(ctx context.Context, destinationIDs []uuid.UUID, jobID uuid.UUID, mode string) (bool, error)
+	// ReleaseBusy releases jobID's hold on the destination; a no-op when it
+	// has none, so a stale/duplicate release never frees another job's hold.
 	ReleaseBusy(ctx context.Context, destinationID, jobID uuid.UUID) error
-	// ReleaseBusyForJobs bulk-releases the gate for a set of jobs whose owning
-	// agent just vanished — called from the same transaction as the existing
-	// orphan-recovery methods (JobRepository.MarkRunningJobsInterrupted*), so
-	// the gate can never get stuck on a crashed/disconnected agent.
+	// ReleaseBusyForJobs releases every hold of a set of jobs.
 	ReleaseBusyForJobs(ctx context.Context, jobIDs []uuid.UUID) error
-	// ReleaseStaleBusy clears every gate held by a job that is gone or no
-	// longer pending/waiting/running. Run at server startup.
+	// ReleaseStaleBusy clears every hold of a job that is no longer
+	// pending/waiting/running. Run at server startup.
 	ReleaseStaleBusy(ctx context.Context) (int64, error)
+	// ListLocks returns the holds of active jobs on the given destinations,
+	// oldest first.
+	ListLocks(ctx context.Context, destinationIDs []uuid.UUID) ([]db.DestinationLock, error)
 }
 
 // -----------------------------------------------------------------------------
@@ -253,6 +264,7 @@ type PolicyRepository interface {
 	ListByAgent(ctx context.Context, agentID uuid.UUID) ([]db.Policy, error)
 	ListEnabled(ctx context.Context) ([]db.Policy, error)
 	UpdateSchedule(ctx context.Context, id uuid.UUID, lastRunAt, nextRunAt time.Time) error
+	UpdateNextRunAt(ctx context.Context, id uuid.UUID, nextRunAt time.Time) error
 
 	// ActivePoliciesCount returns the count of enabled, non-deleted policies.
 	// Used by telemetry.
@@ -276,8 +288,11 @@ type PolicyRepository interface {
 // JobFilter restricts the result set returned by JobRepository.ListFiltered.
 // Zero values mean "no filter" for that field.
 type JobFilter struct {
-	Status string // e.g. "pending", "running", "succeeded", "failed", "cancelled"
-	Type   string // e.g. "backup", "restore"
+	Status        string     // e.g. "pending", "running", "succeeded", "failed", "cancelled"
+	Type          string     // e.g. "backup", "restore"
+	PolicyID      *uuid.UUID // jobs of this policy
+	AgentID       *uuid.UUID // jobs run by this agent
+	DestinationID *uuid.UUID // jobs that wrote to or swept this destination
 }
 
 type JobRepository interface {
@@ -293,7 +308,6 @@ type JobRepository interface {
 	ListFiltered(ctx context.Context, filter JobFilter, opts ListOptions) ([]JobWithNames, int64, error)
 	ListByType(ctx context.Context, jobType string, opts ListOptions) ([]JobWithNames, int64, error)
 	ListByPolicy(ctx context.Context, policyID uuid.UUID, opts ListOptions) ([]JobWithNames, int64, error)
-	ListByAgent(ctx context.Context, agentID uuid.UUID, opts ListOptions) ([]JobWithNames, int64, error)
 	ListByAgentAndStatus(ctx context.Context, agentID uuid.UUID, jobStatus string, opts ListOptions) ([]JobWithNames, error)
 	HasJobForPolicyAfter(ctx context.Context, policyID uuid.UUID, after time.Time) (bool, error)
 	HasPendingJob(ctx context.Context, policyID uuid.UUID) (bool, error)
@@ -303,10 +317,14 @@ type JobRepository interface {
 	//
 	// ListWaiting returns waiting jobs oldest first — the queue order.
 	ListWaiting(ctx context.Context, limit int) ([]db.Job, error)
+	// ListPendingBefore returns pending jobs whose status last changed before
+	// cutoff, oldest first — the ones the queue timeout fails (issue #325).
+	ListPendingBefore(ctx context.Context, cutoff time.Time, limit int) ([]db.Job, error)
 	// HasWaitingForDestinations reports whether a waiting job other than
-	// excludeJobID needs any of the given destinations, so a new job queues
-	// behind it instead of overtaking it.
-	HasWaitingForDestinations(ctx context.Context, destinationIDs []uuid.UUID, excludeJobID uuid.UUID) (bool, error)
+	// excludeJobID needs any of the given destinations in a mode that
+	// conflicts with mode, so a new job queues behind it instead of
+	// overtaking it.
+	HasWaitingForDestinations(ctx context.Context, destinationIDs []uuid.UUID, excludeJobID uuid.UUID, mode string) (bool, error)
 	// HasActiveJobOfType reports whether a job of jobType ("retention",
 	// "check") for the destination is already pending, waiting or running, so
 	// a new one is not queued right behind one that will do the same work.
@@ -331,7 +349,6 @@ type JobRepository interface {
 	CreateRetentionTag(ctx context.Context, t *db.JobRetentionTag) error
 	UpdateRetentionTagStatus(ctx context.Context, jobID, destID uuid.UUID, tag, status string, startedAt, endedAt *time.Time, errMsg string) error
 	ListRetentionTagsByJob(ctx context.Context, jobID uuid.UUID) ([]db.JobRetentionTag, error)
-	ListByDestination(ctx context.Context, destinationID uuid.UUID, opts ListOptions) ([]JobWithNames, int64, error)
 
 	// JobLog
 	BulkCreateLogs(ctx context.Context, logs []db.JobLog) error

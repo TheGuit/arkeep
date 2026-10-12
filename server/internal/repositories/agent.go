@@ -121,8 +121,25 @@ func (r *gormAgentRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-// List returns a paginated list of agents and the total count.
-// Soft-deleted agents are excluded from results.
+// agentSortColumns are the sortable columns of the agents list (issue #320).
+// Text columns sort case-insensitively; an agent never seen sorts last.
+var agentSortColumns = map[string]sortColumn{
+	"name":      {exprs: []string{"LOWER(name)"}},
+	"hostname":  {exprs: []string{"LOWER(hostname)"}},
+	"os":        {exprs: []string{"os", "arch"}},
+	"version":   {exprs: []string{"version"}},
+	"status":    {exprs: []string{"status"}},
+	"last_seen": {exprs: []string{"last_seen_at"}, nullable: true},
+}
+
+// agentOrderClause maps ListOptions.SortBy to a safe ORDER BY clause (see
+// orderClause), by name when unset or unknown.
+func agentOrderClause(opts ListOptions) string {
+	return orderClause(opts, agentSortColumns, "LOWER(name) ASC", "id ASC")
+}
+
+// List returns a paginated list of agents and the total count, ordered by
+// opts (see agentOrderClause). Soft-deleted agents are excluded from results.
 func (r *gormAgentRepository) List(ctx context.Context, opts ListOptions) ([]db.Agent, int64, error) {
 	var agents []db.Agent
 	var total int64
@@ -134,7 +151,7 @@ func (r *gormAgentRepository) List(ctx context.Context, opts ListOptions) ([]db.
 	if err := r.db.WithContext(ctx).
 		Limit(opts.Limit).
 		Offset(opts.Offset).
-		Order("created_at ASC").
+		Order(agentOrderClause(opts)).
 		Find(&agents).Error; err != nil {
 		return nil, 0, fmt.Errorf("agents: list: %w", err)
 	}
@@ -168,7 +185,7 @@ func (r *gormAgentRepository) ListFiltered(ctx context.Context, filter AgentFilt
 	listQ := r.db.WithContext(ctx).
 		Limit(opts.Limit).
 		Offset(opts.Offset).
-		Order("created_at ASC")
+		Order(agentOrderClause(opts))
 	if filter.Search != "" {
 		listQ = listQ.Where("name LIKE ?", "%"+filter.Search+"%")
 	}
@@ -180,6 +197,49 @@ func (r *gormAgentRepository) ListFiltered(ctx context.Context, filter AgentFilt
 		return nil, 0, fmt.Errorf("agents: list filtered: %w", err)
 	}
 	return agents, total, nil
+}
+
+// GetByCertFingerprint returns the live (non-deleted) agent bound to the
+// given client certificate fingerprint. Returns ErrNotFound if none is.
+func (r *gormAgentRepository) GetByCertFingerprint(ctx context.Context, fingerprint string) (*db.Agent, error) {
+	var agent db.Agent
+	err := r.db.WithContext(ctx).First(&agent, "cert_fingerprint = ?", fingerprint).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("agents: get by cert fingerprint: %w", err)
+	}
+	return &agent, nil
+}
+
+// BindCertFingerprint sets the agent's certificate fingerprint only if it has
+// none, so the first certificate to register as the agent wins and a binding
+// is never silently replaced. Reports whether the binding was made.
+func (r *gormAgentRepository) BindCertFingerprint(ctx context.Context, id uuid.UUID, fingerprint string) (bool, error) {
+	result := r.db.WithContext(ctx).Exec(
+		`UPDATE agents SET cert_fingerprint = ? WHERE id = ? AND cert_fingerprint IS NULL AND deleted_at IS NULL`,
+		fingerprint, id,
+	)
+	if result.Error != nil {
+		return false, fmt.Errorf("agents: bind cert fingerprint: %w", result.Error)
+	}
+	return result.RowsAffected == 1, nil
+}
+
+// ResetCertFingerprint clears the agent's certificate binding. Returns
+// ErrNotFound if the agent does not exist.
+func (r *gormAgentRepository) ResetCertFingerprint(ctx context.Context, id uuid.UUID) error {
+	result := r.db.WithContext(ctx).Exec(
+		`UPDATE agents SET cert_fingerprint = NULL WHERE id = ? AND deleted_at IS NULL`, id,
+	)
+	if result.Error != nil {
+		return fmt.Errorf("agents: reset cert fingerprint: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // GetByHostname retrieves a non-deleted agent by its hostname.

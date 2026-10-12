@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/arkeep-io/arkeep/server/internal/db"
 	proto "github.com/arkeep-io/arkeep/shared/proto"
 )
 
@@ -141,7 +142,7 @@ func TestJobFailedReleasesDestinationBusyGate(t *testing.T) {
 	dest := addJobDestination(t, ts, job, "pending")
 
 	ctx := context.Background()
-	if acquired, err := ts.destRepo.TryAcquireBusy(ctx, dest.ID, job.ID); err != nil || !acquired {
+	if acquired, err := ts.destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{dest.ID}, job.ID, db.LockExclusive); err != nil || !acquired {
 		t.Fatalf("TryAcquireBusy: acquired=%v err=%v", acquired, err)
 	}
 
@@ -154,12 +155,12 @@ func TestJobFailedReleasesDestinationBusyGate(t *testing.T) {
 		t.Fatalf("ReportJobStatus FAILED: %v", err)
 	}
 
-	got, err := ts.destRepo.GetByID(ctx, dest.ID)
+	locks, err := ts.destRepo.ListLocks(ctx, []uuid.UUID{dest.ID})
 	if err != nil {
-		t.Fatalf("GetByID: %v", err)
+		t.Fatalf("ListLocks: %v", err)
 	}
-	if got.BusyJobID != nil {
-		t.Errorf("destination BusyJobID = %v after the job failed, want nil (gate must be released)", got.BusyJobID)
+	if len(locks) != 0 {
+		t.Errorf("destination locks = %+v after the job failed, want none (gate must be released)", locks)
 	}
 }
 

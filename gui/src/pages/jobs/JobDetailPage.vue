@@ -283,8 +283,9 @@ onMounted(fetchJob)
         <Alert v-if="job?.status === 'waiting'">
             <Hourglass class="w-4 h-4" />
             <AlertDescription>
-                Waiting for a destination: another backup or retention sweep is in progress on the same
-                repository. This job starts automatically as soon as all its destinations are free.
+                Waiting for a destination: the repository is in use by a job this one cannot run alongside
+                (backups share a repository, retention sweeps and integrity checks need it alone). This job
+                starts automatically as soon as all its destinations are free.
             </AlertDescription>
         </Alert>
 

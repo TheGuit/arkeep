@@ -12,11 +12,10 @@
 //  2. If the retention agent is not connected, log and skip — nothing is
 //     persisted, the next scheduled tick will try again
 //  3. Create a Job (type "retention", PolicyID nil) + one JobDestination
-//  4. Acquire the destination's busy gate (server/internal/repositories'
-//     Destination.BusyJobID) — if already held by another operation
-//     (backup or retention), the job waits in status "waiting" and the
-//     destination queue (package destqueue) starts it once the destination
-//     is free (issue #285)
+//  4. Lock the destination exclusive (db.DestinationLock) — if another
+//     operation (backup, retention or check) holds it, the job waits in
+//     status "waiting" and the destination queue (package destqueue) starts
+//     it once the destination is free (issues #285, #319)
 //  5. Create one JobRetentionTag per tag, then dispatch a JOB_TYPE_FORGET
 //     JobAssignment to the agent
 package retentionscheduler
@@ -336,7 +335,7 @@ func (s *RetentionScheduler) runJob(ctx context.Context, dest *db.Destination) (
 		)
 	}
 
-	err = s.start(ctx, job, dest, tags, password, s.queue.AdmitNew(job.ID))
+	err = s.start(ctx, job, dest, tags, password, s.queue.AdmitNew(job.ID, job.Type))
 	if errors.Is(err, destqueue.ErrNotAdmitted) {
 		return job, s.queue.Enqueue(ctx, job.ID)
 	}

@@ -40,6 +40,7 @@ import { api, apiErrorMessage } from '@/services/api'
 import type { Destination, Job, ApiResponse, SyncDestinationResponse } from '@/types'
 import { statusVariant, statusClass, statusLabel, formatDate, formatBytes } from '@/lib/jobUtils'
 import { summariseSync } from '@/lib/syncSummary'
+import { lockExplanation, lockLabel } from '@/lib/destinationLocks'
 import DestinationSheet from '@/components/destinations/DestinationSheet.vue'
 
 defineOptions({ inheritAttrs: false })
@@ -237,7 +238,7 @@ onMounted(() => Promise.all([fetchDestination(), fetchJobs()]))
                                 {{ destination.enabled ? 'Enabled' : 'Disabled' }}
                             </Badge>
                             <Badge v-if="destination.append_only" variant="outline">Append-only</Badge>
-                            <Badge v-if="destination.busy_job_id" variant="outline">Busy</Badge>
+                            <Badge v-if="destination.locks.length" variant="outline">{{ lockLabel(destination.locks) }}</Badge>
                             <Badge v-if="destination.retention_needs_review" variant="destructive">
                                 Retention needs reconfiguration
                             </Badge>
@@ -247,11 +248,16 @@ onMounted(() => Promise.all([fetchDestination(), fetchJobs()]))
                             <span v-if="destination.policy_count > 0">
                                 · Used by {{ destination.policy_count }} polic{{ destination.policy_count === 1 ? 'y' : 'ies' }}
                             </span>
-                            <span v-if="destination.busy_job_id">
-                                · In use since {{ formatDate(destination.busy_since) }} by
-                                <RouterLink :to="{ name: 'job-detail', params: { id: destination.busy_job_id } }"
-                                    class="underline underline-offset-4 hover:text-foreground">this job</RouterLink>
-                                — other jobs here wait until it finishes
+                            <span v-if="destination.locks.length">
+                                · In use since {{ formatDate(destination.locks[0].since) }} by
+                                <template v-for="(lock, i) in destination.locks" :key="lock.job_id">
+                                    <template v-if="i > 0">, </template>
+                                    <RouterLink :to="{ name: 'job-detail', params: { id: lock.job_id } }"
+                                        class="underline underline-offset-4 hover:text-foreground">
+                                        {{ destination.locks.length === 1 ? 'this job' : `job ${i + 1}` }}
+                                    </RouterLink>
+                                </template>
+                                — {{ lockExplanation(destination.locks) }}
                             </span>
                         </p>
                     </template>

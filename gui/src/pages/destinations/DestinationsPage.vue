@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Table,
@@ -39,15 +39,15 @@ import {
   Trash2,
   Archive,
   HardDrive,
-  ChevronUp,
-  ChevronDown,
-  ChevronsUpDown,
   Server,
   Globe,
   Network,
   Cloud,
 } from '@lucide/vue'
 import { formatDate } from '@/lib/jobUtils'
+import { lockExplanation, lockLabel } from '@/lib/destinationLocks'
+import SortableTableHead from '@/components/shared/SortableTableHead.vue'
+import { useListSort } from '@/composables/useListSort'
 import { api, apiErrorMessage } from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 import type { Destination, ApiResponse } from '@/types'
@@ -82,9 +82,9 @@ const totalPages = computed(() => Math.ceil(total.value / pageSize))
 // majority — good enough for a "go look at this" nudge.
 const needsReviewCount = computed(() => destinations.value.filter(d => d.retention_needs_review).length)
 
-// Usage-column sort, applied server-side so ordering is global across pages.
-// Cycles: none → desc → asc → none.
-const usageSort = ref<'none' | 'desc' | 'asc'>('none')
+// Usage-column sort, applied server-side so ordering is global across pages
+// and kept in the URL. Cycles: none → desc → asc → none.
+const { sortKey, sortOrder, queryParams: sortParams, toggle: toggleSort } = useListSort()
 
 // Sheet
 const sheetOpen = ref(false)
@@ -135,12 +135,11 @@ function formatBytes(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
 }
 
-// Cycle the Usage sort (none → desc → asc → none), reset to page 1, and refetch.
-function toggleUsageSort() {
-  usageSort.value = usageSort.value === 'none' ? 'desc' : usageSort.value === 'desc' ? 'asc' : 'none'
+// A new sort starts again from the first page.
+watch(sortParams, () => {
   page.value = 1
   fetchDestinations()
-}
+})
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -150,8 +149,7 @@ async function fetchDestinations() {
   loading.value = true
   error.value = null
   try {
-    const sortParam = usageSort.value !== 'none' ? `&sort=usage&order=${usageSort.value}` : ''
-    const res = await api<ApiResponse<DestinationListResponse>>(`/api/v1/destinations?limit=${pageSize}&offset=${offset.value}${sortParam}`)
+    const res = await api<ApiResponse<DestinationListResponse>>(`/api/v1/destinations?limit=${pageSize}&offset=${offset.value}${sortParams.value}`)
     destinations.value = res.data.items
     total.value = res.data.total
   } catch (e: any) {
@@ -278,16 +276,8 @@ onMounted(fetchDestinations)
             <TableHead>Name</TableHead>
             <TableHead>Type</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead>
-              <button type="button"
-                class="inline-flex items-center gap-1 hover:text-foreground transition-colors"
-                @click="toggleUsageSort">
-                Usage
-                <ChevronDown v-if="usageSort === 'desc'" class="w-3.5 h-3.5" />
-                <ChevronUp v-else-if="usageSort === 'asc'" class="w-3.5 h-3.5" />
-                <ChevronsUpDown v-else class="w-3.5 h-3.5 opacity-40" />
-              </button>
-            </TableHead>
+            <SortableTableHead label="Usage" :active="sortKey === 'usage'" :order="sortOrder"
+              @toggle="toggleSort('usage', 'desc')" />
             <TableHead>Created</TableHead>
             <TableHead class="w-13" />
           </TableRow>
@@ -369,12 +359,12 @@ onMounted(fetchDestinations)
                   <Badge :variant="dest.enabled ? 'default' : 'secondary'">
                     {{ dest.enabled ? 'Enabled' : 'Disabled' }}
                   </Badge>
-                  <!-- Busy gate: another backup or retention sweep holds the
-                       repository; links to that job (issue #290). -->
-                  <RouterLink v-if="dest.busy_job_id" :to="{ name: 'job-detail', params: { id: dest.busy_job_id } }"
-                    :title="`In use by a running job since ${formatDate(dest.busy_since)}. Other backups and retention sweeps to this destination wait until it finishes.`"
+                  <!-- Destination locks: the jobs holding the repository; links
+                       to the oldest one (issues #290, #319). -->
+                  <RouterLink v-if="dest.locks.length" :to="{ name: 'job-detail', params: { id: dest.locks[0].job_id } }"
+                    :title="`In use since ${formatDate(dest.locks[0].since)}: ${lockExplanation(dest.locks)}.`"
                     @click.stop>
-                    <Badge variant="outline" class="text-xs font-normal">Busy</Badge>
+                    <Badge variant="outline" class="text-xs font-normal">{{ lockLabel(dest.locks) }}</Badge>
                   </RouterLink>
                 </div>
               </TableCell>

@@ -2,8 +2,11 @@ package repositories
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/arkeep-io/arkeep/server/internal/db"
 )
@@ -22,7 +25,7 @@ func busyFixture(t *testing.T, destRepo DestinationRepository, jobRepo JobReposi
 	if err := jobRepo.Create(ctx, holder); err != nil {
 		t.Fatalf("create holder job: %v", err)
 	}
-	if acquired, err := destRepo.TryAcquireBusy(ctx, dest.ID, holder.ID); err != nil || !acquired {
+	if acquired, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{dest.ID}, holder.ID, db.LockExclusive); err != nil || !acquired {
 		t.Fatalf("TryAcquireBusy holder: acquired=%v err=%v", acquired, err)
 	}
 	return dest, holder
@@ -39,16 +42,19 @@ func setJobStatus(t *testing.T, jobRepo JobRepository, job *db.Job, status strin
 	}
 }
 
-func busyHolder(t *testing.T, destRepo DestinationRepository, dest *db.Destination) string {
+// busyHolder returns the IDs of the jobs holding the destination — active or stale — in
+// acquisition order, joined by ",": "" when nothing holds it.
+func busyHolder(t *testing.T, destRepo DestinationRepository, destID uuid.UUID) string {
 	t.Helper()
-	got, err := destRepo.GetByID(context.Background(), dest.ID)
-	if err != nil {
-		t.Fatalf("GetByID: %v", err)
+	r := destRepo.(*gormDestinationRepository)
+	var ids []string
+	if err := r.db.Model(&db.DestinationLock{}).
+		Where("destination_id = ?", destID).
+		Order("acquired_at, job_id").
+		Pluck("job_id", &ids).Error; err != nil {
+		t.Fatalf("list holders: %v", err)
 	}
-	if got.BusyJobID == nil {
-		return ""
-	}
-	return got.BusyJobID.String()
+	return strings.Join(ids, ",")
 }
 
 func TestTryAcquireBusy_TakesOverStaleGate(t *testing.T) {
@@ -90,7 +96,7 @@ func TestTryAcquireBusy_TakesOverStaleGate(t *testing.T) {
 			if err := jobRepo.Create(ctx, next); err != nil {
 				t.Fatalf("create next job: %v", err)
 			}
-			acquired, err := destRepo.TryAcquireBusy(ctx, dest.ID, next.ID)
+			acquired, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{dest.ID}, next.ID, db.LockExclusive)
 			if err != nil {
 				t.Fatalf("TryAcquireBusy: %v", err)
 			}
@@ -101,8 +107,8 @@ func TestTryAcquireBusy_TakesOverStaleGate(t *testing.T) {
 			if tc.wantAcquired {
 				wantHolder = next.ID.String()
 			}
-			if got := busyHolder(t, destRepo, dest); got != wantHolder {
-				t.Errorf("busy_job_id = %q, want %q", got, wantHolder)
+			if got := busyHolder(t, destRepo, dest.ID); got != wantHolder {
+				t.Errorf("holder = %q, want %q", got, wantHolder)
 			}
 		})
 	}
@@ -123,20 +129,20 @@ func TestUpdateStatus_TerminalReleasesBusyGate(t *testing.T) {
 	if err := jobRepo.UpdateStatus(ctx, holder.ID, "running", &now, nil, ""); err != nil {
 		t.Fatalf("UpdateStatus running: %v", err)
 	}
-	if got := busyHolder(t, destRepo, dest); got != holder.ID.String() {
-		t.Fatalf("busy_job_id after running = %q, want still held", got)
+	if got := busyHolder(t, destRepo, dest.ID); got != holder.ID.String() {
+		t.Fatalf("holder after running = %q, want still held", got)
 	}
 
 	// Cancelling (the path of the issue #290 reproduction) releases it.
 	if err := jobRepo.UpdateStatus(ctx, holder.ID, "cancelled", nil, &now, ""); err != nil {
 		t.Fatalf("UpdateStatus cancelled: %v", err)
 	}
-	if got := busyHolder(t, destRepo, dest); got != "" {
-		t.Errorf("busy_job_id after cancel = %q, want released", got)
+	if got := busyHolder(t, destRepo, dest.ID); got != "" {
+		t.Errorf("holder after cancel = %q, want released", got)
 	}
 	// Another job's gate is untouched.
-	if got := busyHolder(t, destRepo, other); got != otherHolder.ID.String() {
-		t.Errorf("unrelated busy_job_id = %q, want %q", got, otherHolder.ID)
+	if got := busyHolder(t, destRepo, other.ID); got != otherHolder.ID.String() {
+		t.Errorf("unrelated holder = %q, want %q", got, otherHolder.ID)
 	}
 }
 
@@ -158,10 +164,10 @@ func TestReleaseStaleBusy(t *testing.T) {
 	if n != 1 {
 		t.Errorf("released %d gates, want 1", n)
 	}
-	if got := busyHolder(t, destRepo, stale); got != "" {
-		t.Errorf("stale busy_job_id = %q, want released", got)
+	if got := busyHolder(t, destRepo, stale.ID); got != "" {
+		t.Errorf("stale holder = %q, want released", got)
 	}
-	if got := busyHolder(t, destRepo, active); got != activeHolder.ID.String() {
-		t.Errorf("active busy_job_id = %q, want %q (job still running)", got, activeHolder.ID)
+	if got := busyHolder(t, destRepo, active.ID); got != activeHolder.ID.String() {
+		t.Errorf("active holder = %q, want %q (job still running)", got, activeHolder.ID)
 	}
 }

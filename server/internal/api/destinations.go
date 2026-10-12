@@ -112,11 +112,18 @@ type destinationResponse struct {
 	// backs the "already used by N other policies" notice in the policy
 	// editor's destination picker.
 	PolicyCount int64 `json:"policy_count"`
-	// BusyJobID is the job (backup or retention) currently holding this
-	// destination's busy gate, "" when it is free; BusySince is when it took
-	// it. Lets the GUI explain why a backup to this destination was skipped.
-	BusyJobID string `json:"busy_job_id"`
-	BusySince string `json:"busy_since"`
+	// Locks are the jobs currently holding this destination, oldest first,
+	// empty when it is free: backups hold it shared, a retention sweep or
+	// integrity check exclusive (issue #319). Lets the GUI explain why a job
+	// on this destination is waiting.
+	Locks []destinationLockResponse `json:"locks"`
+}
+
+// destinationLockResponse is one job's hold on a destination.
+type destinationLockResponse struct {
+	JobID string `json:"job_id"`
+	Mode  string `json:"mode"` // "shared" | "exclusive"
+	Since string `json:"since"`
 }
 
 // singleDestinationResponse builds a destinationResponse for a single
@@ -134,13 +141,18 @@ func (h *DestinationHandler) singleDestinationResponse(ctx context.Context, d *d
 			agentName = agent.Name
 		}
 	}
-	return destinationToResponse(d, policyCount, agentName)
+	locks, err := h.repo.ListLocks(ctx, []uuid.UUID{d.ID})
+	if err != nil {
+		h.logger.Warn("failed to load destination locks", zap.String("destination_id", d.ID.String()), zap.Error(err))
+	}
+	return destinationToResponse(d, policyCount, agentName, locks)
 }
 
 // destinationToResponse converts a db.Destination to a destinationResponse.
-// policyCount and retentionAgentName are resolved by the caller (List/GetByID)
-// to avoid this pure conversion function needing repository access.
-func destinationToResponse(d *db.Destination, policyCount int64, retentionAgentName string) destinationResponse {
+// policyCount, retentionAgentName and locks (the destination's own) are
+// resolved by the caller (List/GetByID) to avoid this pure conversion function
+// needing repository access.
+func destinationToResponse(d *db.Destination, policyCount int64, retentionAgentName string, locks []db.DestinationLock) destinationResponse {
 	resp := destinationResponse{
 		ID:            d.ID.String(),
 		Name:          d.Name,
@@ -174,6 +186,7 @@ func destinationToResponse(d *db.Destination, policyCount int64, retentionAgentN
 		CheckSubsetPercent:   d.CheckSubsetPercent,
 		LastCheckStatus:      d.LastCheckStatus,
 		PolicyCount:          policyCount,
+		Locks:                make([]destinationLockResponse, 0, len(locks)),
 	}
 	if d.LastCheckAt != nil {
 		resp.LastCheckAt = d.LastCheckAt.UTC().Format(time.RFC3339)
@@ -181,11 +194,12 @@ func destinationToResponse(d *db.Destination, policyCount int64, retentionAgentN
 	if d.LastCheckJobID != nil {
 		resp.LastCheckJobID = d.LastCheckJobID.String()
 	}
-	if d.BusyJobID != nil {
-		resp.BusyJobID = d.BusyJobID.String()
-	}
-	if d.BusySince != nil {
-		resp.BusySince = d.BusySince.UTC().Format(time.RFC3339)
+	for _, l := range locks {
+		resp.Locks = append(resp.Locks, destinationLockResponse{
+			JobID: l.JobID.String(),
+			Mode:  l.Mode,
+			Since: l.AcquiredAt.UTC().Format(time.RFC3339),
+		})
 	}
 	if d.RetentionAgentID != nil {
 		resp.RetentionAgentID = d.RetentionAgentID.String()
@@ -211,12 +225,8 @@ var validDestinationTypes = map[string]bool{
 // List handles GET /api/v1/destinations.
 // Supports an optional ?search= query parameter for substring name filtering.
 func (h *DestinationHandler) List(w http.ResponseWriter, r *http.Request) {
-	opts := paginationOpts(r)
-	// Optional server-side sort (e.g. ?sort=usage&order=desc). The column is
-	// validated against a whitelist in the repository layer; unknown values
-	// fall back to the default order.
-	opts.SortBy = r.URL.Query().Get("sort")
-	opts.SortDesc = r.URL.Query().Get("order") == "desc"
+	// Optional server-side sort (e.g. ?sort=usage&order=desc).
+	opts := sortedPaginationOpts(r)
 
 	var destinations []db.Destination
 	var total int64
@@ -253,13 +263,27 @@ func (h *DestinationHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// One query for the locks of the whole page.
+	destIDs := make([]uuid.UUID, len(destinations))
+	for i := range destinations {
+		destIDs[i] = destinations[i].ID
+	}
+	locksByDest := make(map[uuid.UUID][]db.DestinationLock)
+	if locks, err := h.repo.ListLocks(r.Context(), destIDs); err != nil {
+		h.logger.Warn("failed to load locks for destinations list", zap.Error(err))
+	} else {
+		for _, l := range locks {
+			locksByDest[l.DestinationID] = append(locksByDest[l.DestinationID], l)
+		}
+	}
+
 	items := make([]destinationResponse, len(destinations))
 	for i := range destinations {
 		agentName := ""
 		if destinations[i].RetentionAgentID != nil {
 			agentName = agentNameByID[*destinations[i].RetentionAgentID]
 		}
-		items[i] = destinationToResponse(&destinations[i], policyCounts[destinations[i].ID], agentName)
+		items[i] = destinationToResponse(&destinations[i], policyCounts[destinations[i].ID], agentName, locksByDest[destinations[i].ID])
 	}
 
 	Ok(w, listDestinationsResponse{Items: items, Total: total})
@@ -321,15 +345,13 @@ func (h *DestinationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.Config == "" {
 		req.Config = "{}"
 	}
-	if req.Type == "rclone" {
-		if err := validateRcloneConfig(req.Config); err != nil {
-			ErrBadRequest(w, err.Error())
-			return
-		}
-		if hasNonEmptyCredential(req.Credentials) {
-			ErrBadRequest(w, errRcloneCredentials.Error())
-			return
-		}
+	if err := destutil.ValidateConfig(req.Type, req.Config); err != nil {
+		ErrBadRequest(w, err.Error())
+		return
+	}
+	if err := destutil.ValidateCredentials(req.Type, req.Credentials); err != nil {
+		ErrBadRequest(w, err.Error())
+		return
 	}
 	if req.RetentionEnabled && req.AppendOnly {
 		ErrBadRequest(w, "retention cannot be enabled on an append-only destination")
@@ -553,18 +575,19 @@ func (h *DestinationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		dest.Name = *req.Name
 	}
-	// Only what the PATCH changes is validated, so a legacy rclone row can
-	// still be renamed or disabled; BuildRepoURL refuses an invalid remote
-	// at dispatch time regardless, and BuildEnv ignores stored credentials.
-	if dest.Type == "rclone" {
-		if req.Config != nil {
-			if err := validateRcloneConfig(*req.Config); err != nil {
-				ErrBadRequest(w, err.Error())
-				return
-			}
+	// Only what the PATCH changes is validated, so a legacy row can still be
+	// renamed or disabled; BuildRepoURL refuses an invalid rclone remote at
+	// dispatch time regardless, and BuildEnv ignores rclone credentials.
+	// Blank credentials mean "keep the stored ones" and are not validated.
+	if req.Config != nil {
+		if err := destutil.ValidateConfig(dest.Type, *req.Config); err != nil {
+			ErrBadRequest(w, err.Error())
+			return
 		}
-		if req.Credentials != nil && hasNonEmptyCredential(*req.Credentials) {
-			ErrBadRequest(w, errRcloneCredentials.Error())
+	}
+	if req.Credentials != nil && hasNonEmptyCredential(*req.Credentials) {
+		if err := destutil.ValidateCredentials(dest.Type, *req.Credentials); err != nil {
+			ErrBadRequest(w, err.Error())
 			return
 		}
 	}
@@ -713,23 +736,6 @@ func validateCheckSettings(schedule, mode string, subsetPercent int) error {
 		return errors.New("check_subset_percent must be between 1 and 100")
 	}
 	return nil
-}
-
-// errRcloneCredentials rejects credentials on an rclone destination. rclone
-// remotes are configured in rclone.conf on the agent, so there is nothing to
-// store, and the server no longer turns credentials into agent env vars.
-var errRcloneCredentials = errors.New("rclone destinations take no credentials: configure the remote in rclone.conf on the agent")
-
-// validateRcloneConfig rejects an rclone config whose remote is not a plain
-// remote name (see destutil.ValidateRcloneRemote).
-func validateRcloneConfig(config string) error {
-	var cfg struct {
-		Remote string `json:"remote"`
-	}
-	if err := json.Unmarshal([]byte(config), &cfg); err != nil {
-		return errors.New("config must be a JSON object")
-	}
-	return destutil.ValidateRcloneRemote(cfg.Remote)
 }
 
 // hasNonEmptyCredential reports whether the credentials JSON carries at least
@@ -1139,7 +1145,7 @@ func (h *DestinationHandler) Sync(w http.ResponseWriter, r *http.Request) {
 		ErrConflict(w, "no agent that can reach this destination is connected")
 		return
 	case errors.Is(err, snapshotsync.ErrDestinationBusy):
-		ErrConflict(w, "a backup or retention sweep is running on this destination — try again when it finishes")
+		ErrConflict(w, "a backup, retention sweep or integrity check is running on this destination — try again when it finishes")
 		return
 	case errors.Is(err, snapshotsync.ErrNoRepoPassword):
 		ErrConflict(w, "the repository password of this destination is unknown — import its snapshots once to store it")

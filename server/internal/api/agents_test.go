@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"testing"
 )
 
@@ -28,6 +30,30 @@ func TestAgentHandler_List(t *testing.T) {
 		}
 		if data.Total != 0 {
 			t.Errorf("total = %d, want 0", data.Total)
+		}
+	})
+
+	// Issue #320: ?sort= and ?order=desc reach the repository.
+	t.Run("sorts by name descending", func(t *testing.T) {
+		e := newTestEnv(t)
+		for _, name := range []string{"bravo", "alpha", "charlie"} {
+			createDBAgent(t, e.deps, name)
+		}
+
+		resp := e.get(t, "/api/v1/agents?sort=name&order=desc", e.adminToken(t))
+		assertStatus(t, resp, http.StatusOK)
+		var data struct {
+			Items []struct {
+				Name string `json:"name"`
+			} `json:"items"`
+		}
+		decodeData(t, resp, &data)
+		var got []string
+		for _, a := range data.Items {
+			got = append(got, a.Name)
+		}
+		if want := []string{"charlie", "bravo", "alpha"}; !slices.Equal(got, want) {
+			t.Errorf("agents = %v, want %v", got, want)
 		}
 	})
 
@@ -227,6 +253,43 @@ func TestAgentHandler_Delete(t *testing.T) {
 		e := newTestEnv(t)
 		resp := e.del(t, "/api/v1/agents/00000000-0000-0000-0000-000000000001", "")
 		assertStatus(t, resp, http.StatusUnauthorized)
+	})
+}
+
+func TestAgentHandler_ResetIdentity(t *testing.T) {
+	t.Run("admin unbinds the agent from its certificate", func(t *testing.T) {
+		e := newTestEnv(t)
+		ctx := context.Background()
+		agent := createDBAgent(t, e.deps, "bound-agent")
+		if ok, err := e.deps.agents.BindCertFingerprint(ctx, agent.ID, "fp"); err != nil || !ok {
+			t.Fatalf("BindCertFingerprint = %v, %v", ok, err)
+		}
+
+		resp := e.get(t, "/api/v1/agents/"+agent.ID.String(), e.adminToken(t))
+		var before struct {
+			IdentityBound bool `json:"identity_bound"`
+		}
+		decodeData(t, resp, &before)
+		if !before.IdentityBound {
+			t.Error("identity_bound = false before the reset, want true")
+		}
+
+		resp = e.post(t, "/api/v1/agents/"+agent.ID.String()+"/reset-identity", e.adminToken(t), nil)
+		assertStatus(t, resp, http.StatusNoContent)
+
+		stored, err := e.deps.agents.GetByID(ctx, agent.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if stored.CertFingerprint != nil {
+			t.Errorf("CertFingerprint = %q after the reset, want nil", *stored.CertFingerprint)
+		}
+	})
+
+	t.Run("returns 404 for non-existent agent", func(t *testing.T) {
+		e := newTestEnv(t)
+		resp := e.post(t, "/api/v1/agents/00000000-0000-0000-0000-000000000001/reset-identity", e.adminToken(t), nil)
+		assertStatus(t, resp, http.StatusNotFound)
 	})
 }
 

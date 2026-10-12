@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 	gormlogger "gorm.io/gorm/logger"
 
@@ -19,11 +20,13 @@ import (
 	proto "github.com/arkeep-io/arkeep/shared/proto"
 )
 
-// TestDestinationQueue_SecondBackupStartsWhenFirstFinishes is the scenario of
-// issue #285 end to end: two policies back up to the same destination at the
-// same time. The second waits instead of being skipped, and the server sends
-// it to the agent on its own as soon as the first one reports its result.
-func TestDestinationQueue_SecondBackupStartsWhenFirstFinishes(t *testing.T) {
+// TestDestinationQueue_BackupWaitsForSweepThenRunsBesideAnother is the
+// destination queue end to end (issues #285, #319): a backup triggered while a
+// retention sweep holds the destination waits instead of being skipped, and
+// the server sends it to the agent on its own as soon as the sweep reports its
+// result. A second backup to the same destination then goes out at once:
+// backups share the destination.
+func TestDestinationQueue_BackupWaitsForSweepThenRunsBesideAnother(t *testing.T) {
 	ctx := context.Background()
 
 	gdb, err := db.New(db.Config{Driver: "sqlite", DSN: ":memory:", Logger: zap.NewNop(), LogLevel: gormlogger.Silent})
@@ -104,40 +107,53 @@ func TestDestinationQueue_SecondBackupStartsWhenFirstFinishes(t *testing.T) {
 		}
 	}
 
+	// A retention sweep is running on the destination.
+	sweep := &db.Job{AgentID: agentID, Type: "retention", Status: "running"}
+	if err := jobRepo.Create(ctx, sweep); err != nil {
+		t.Fatalf("create sweep: %v", err)
+	}
+	if err := jobRepo.CreateDestination(ctx, &db.JobDestination{JobID: sweep.ID, DestinationID: dest.ID, Status: "running"}); err != nil {
+		t.Fatalf("create sweep destination: %v", err)
+	}
+	if ok, err := destRepo.TryAcquireBusyAll(ctx, []uuid.UUID{dest.ID}, sweep.ID, db.LockExclusive); err != nil || !ok {
+		t.Fatalf("lock destination for the sweep: %v %v", ok, err)
+	}
+
 	job1, err := sched.TriggerNow(ctx, first.ID)
 	if err != nil {
 		t.Fatalf("TriggerNow(first): %v", err)
 	}
-	expectAssignment(job1.ID.String())
-
-	job2, err := sched.TriggerNow(ctx, second.ID)
-	if err != nil {
-		t.Fatalf("TriggerNow(second): %v", err)
-	}
-	waitForJobStatus(t, jobRepo, job2.ID.String(), "waiting")
+	waitForJobStatus(t, jobRepo, job1.ID.String(), "waiting")
 	select {
 	case a := <-received:
-		t.Fatalf("agent received job %s while the destination was busy", a.JobId)
+		t.Fatalf("agent received job %s while the sweep held the destination", a.JobId)
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	// The first backup runs and finishes.
-	agent.reportStatus(t, job1.ID.String(), proto.JobStatus_JOB_STATUS_RUNNING)
+	// The sweep finishes. The release notifies the queue: the backup goes out
+	// well before the fallback ticker would fire.
 	if _, err := agent.client.ReportDestinationStatus(ctx, &proto.DestinationStatusReport{
-		JobId:         job1.ID.String(),
+		JobId:         sweep.ID.String(),
 		AgentId:       agentID.String(),
 		DestinationId: dest.ID.String(),
 		Status:        "succeeded",
 	}); err != nil {
 		t.Fatalf("ReportDestinationStatus: %v", err)
 	}
+	expectAssignment(job1.ID.String())
+	waitForJobStatus(t, jobRepo, job1.ID.String(), "pending")
 
-	// The release notifies the queue: the second backup goes out well before
-	// the fallback ticker would fire.
+	// A second backup to the same destination runs beside the first.
+	job2, err := sched.TriggerNow(ctx, second.ID)
+	if err != nil {
+		t.Fatalf("TriggerNow(second): %v", err)
+	}
 	expectAssignment(job2.ID.String())
-	waitForJobStatus(t, jobRepo, job2.ID.String(), "pending")
-	pollUntil(t, 3*time.Second, func() bool {
-		d, err := destRepo.GetByID(ctx, dest.ID)
-		return err == nil && d.BusyJobID != nil && *d.BusyJobID == job2.ID
-	})
+	locks, err := destRepo.ListLocks(ctx, []uuid.UUID{dest.ID})
+	if err != nil {
+		t.Fatalf("ListLocks: %v", err)
+	}
+	if len(locks) != 2 || locks[0].JobID != job1.ID || locks[1].JobID != job2.ID {
+		t.Errorf("destination locks = %+v, want both backups", locks)
+	}
 }

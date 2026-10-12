@@ -129,7 +129,7 @@ var terminalJobStatuses = []string{"succeeded", "failed", "cancelled", "interrup
 // gave up on the job cannot resurrect it. Returns ErrNotFound if no such job
 // exists.
 //
-// Moving a job to a terminal status also releases any destination busy gate it
+// Moving a job to a terminal status also releases any destination lock it
 // still holds, in the same transaction: whichever path ends the job (agent
 // report, user cancel, server-side failure), the gate never outlives it
 // (issue #290).
@@ -157,12 +157,7 @@ func (r *gormJobRepository) UpdateStatus(ctx context.Context, id uuid.UUID, stat
 		if rowsAffected == 0 || !slices.Contains(terminalJobStatuses, status) {
 			return nil
 		}
-		return tx.Model(&db.Destination{}).
-			Where("busy_job_id = ?", id).
-			Updates(map[string]interface{}{
-				"busy_job_id": nil,
-				"busy_since":  nil,
-			}).Error
+		return tx.Where("job_id = ?", id).Delete(&db.DestinationLock{}).Error
 	})
 	if err != nil {
 		return fmt.Errorf("jobs: update status: %w", err)
@@ -190,7 +185,10 @@ func (r *gormJobRepository) UpdateStatus(ctx context.Context, id uuid.UUID, stat
 // Pending retention jobs are swept too: unlike a pending backup, which
 // DispatchPending re-sends on reconnect, a retention job has no retry queue, so
 // one the agent never picked up would hold its destination's busy gate forever
-// (issue #283).
+// (issue #283). A pending backup stays pending, but the gates it claimed when it
+// was sent are released (issue #319): the agent may stay away for days, and
+// every other job on those destinations would wait for it. DispatchPending
+// claims them again when it re-sends the job.
 //
 // "interrupted" rather than "failed" is what makes these jobs eligible for
 // automatic resume: the agent vanished, it did not report an error. The
@@ -203,8 +201,6 @@ func (r *gormJobRepository) UpdateStatus(ctx context.Context, id uuid.UUID, stat
 //
 // Returns the number of jobs updated.
 func (r *gormJobRepository) MarkRunningJobsInterruptedForAgent(ctx context.Context, agentID uuid.UUID, errMsg string) (int64, error) {
-	now := time.Now().UTC()
-
 	var updated int64
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// Collect the affected job IDs first: the destination rows have to be
@@ -215,43 +211,16 @@ func (r *gormJobRepository) MarkRunningJobsInterruptedForAgent(ctx context.Conte
 			Pluck("id", &jobIDs).Error; err != nil {
 			return fmt.Errorf("select running jobs: %w", err)
 		}
+		if err := releasePendingBackupGates(tx, &agentID); err != nil {
+			return err
+		}
 		if len(jobIDs) == 0 {
 			return nil
 		}
 
-		result := tx.Model(&db.Job{}).
-			Where("id IN ?", jobIDs).
-			Updates(map[string]interface{}{
-				"status":   "interrupted",
-				"ended_at": now,
-				"error":    errMsg,
-			})
-		if result.Error != nil {
-			return fmt.Errorf("update jobs: %w", result.Error)
-		}
-		updated = result.RowsAffected
-
-		if err := tx.Model(&db.JobDestination{}).
-			Where("job_id IN ? AND status IN ?", jobIDs, []string{"pending", "running"}).
-			Updates(map[string]interface{}{
-				"status":   "interrupted",
-				"ended_at": now,
-				"error":    errMsg,
-			}).Error; err != nil {
-			return fmt.Errorf("update job destinations: %w", err)
-		}
-		// Release any destination busy gate these jobs held — an agent that
-		// vanished mid-operation must never leave a destination permanently
-		// locked out of future backups/retention (issue #130).
-		if err := tx.Model(&db.Destination{}).
-			Where("busy_job_id IN ?", jobIDs).
-			Updates(map[string]interface{}{
-				"busy_job_id": nil,
-				"busy_since":  nil,
-			}).Error; err != nil {
-			return fmt.Errorf("release destination busy gate: %w", err)
-		}
-		return nil
+		var err error
+		updated, err = interruptJobs(tx, jobIDs, time.Now().UTC(), errMsg)
+		return err
 	})
 	if err != nil {
 		return 0, fmt.Errorf("jobs: mark running interrupted for agent: %w", err)
@@ -285,14 +254,12 @@ func (r *gormJobRepository) MarkResumeExhausted(ctx context.Context, id uuid.UUI
 }
 
 // MarkRunningJobsInterrupted does the same for every agent, pending retention
-// jobs included. Called once at server startup: a job that was running when the
-// process died has no stream teardown to recover it and would stay "running"
-// forever.
+// jobs and the gates of pending backups included. Called once at server
+// startup: a job that was running when the process died has no stream teardown
+// to recover it and would stay "running" forever.
 //
 // Returns the number of jobs updated.
 func (r *gormJobRepository) MarkRunningJobsInterrupted(ctx context.Context, errMsg string) (int64, error) {
-	now := time.Now().UTC()
-
 	var updated int64
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var jobIDs []uuid.UUID
@@ -301,47 +268,83 @@ func (r *gormJobRepository) MarkRunningJobsInterrupted(ctx context.Context, errM
 			Pluck("id", &jobIDs).Error; err != nil {
 			return fmt.Errorf("select running jobs: %w", err)
 		}
+		if err := releasePendingBackupGates(tx, nil); err != nil {
+			return err
+		}
 		if len(jobIDs) == 0 {
 			return nil
 		}
 
-		result := tx.Model(&db.Job{}).
-			Where("id IN ?", jobIDs).
-			Updates(map[string]interface{}{
-				"status":   "interrupted",
-				"ended_at": now,
-				"error":    errMsg,
-			})
-		if result.Error != nil {
-			return fmt.Errorf("update jobs: %w", result.Error)
-		}
-		updated = result.RowsAffected
-
-		if err := tx.Model(&db.JobDestination{}).
-			Where("job_id IN ? AND status IN ?", jobIDs, []string{"pending", "running"}).
-			Updates(map[string]interface{}{
-				"status":   "interrupted",
-				"ended_at": now,
-				"error":    errMsg,
-			}).Error; err != nil {
-			return fmt.Errorf("update job destinations: %w", err)
-		}
-		// See MarkRunningJobsInterruptedForAgent — same busy-gate release,
-		// here for the server-restart-wide sweep.
-		if err := tx.Model(&db.Destination{}).
-			Where("busy_job_id IN ?", jobIDs).
-			Updates(map[string]interface{}{
-				"busy_job_id": nil,
-				"busy_since":  nil,
-			}).Error; err != nil {
-			return fmt.Errorf("release destination busy gate: %w", err)
-		}
-		return nil
+		var err error
+		updated, err = interruptJobs(tx, jobIDs, time.Now().UTC(), errMsg)
+		return err
 	})
 	if err != nil {
 		return 0, fmt.Errorf("jobs: mark running interrupted: %w", err)
 	}
 	return updated, nil
+}
+
+// releasePendingBackupGates releases, inside tx, the destination locks held by
+// pending backups — of agentID, or of every agent when it is nil (issue
+// #319). Such a backup was sent to an agent that is gone: the job stays pending
+// for DispatchPending, which claims its destinations again when it re-sends it.
+func releasePendingBackupGates(tx *gorm.DB, agentID *uuid.UUID) error {
+	pending := tx.Session(&gorm.Session{NewDB: true}).Model(&db.Job{}).
+		Select("id").
+		Where("type = ? AND status = ?", "backup", "pending")
+	if agentID != nil {
+		pending = pending.Where("agent_id = ?", *agentID)
+	}
+	if err := tx.Where("job_id IN (?)", pending).Delete(&db.DestinationLock{}).Error; err != nil {
+		return fmt.Errorf("release pending backup gates: %w", err)
+	}
+	return nil
+}
+
+// interruptJobs marks jobIDs "interrupted" inside tx, closes out their child
+// rows that had not finished, and releases the destination busy gates they
+// held. Shared by both interrupt sweeps; returns the number of jobs updated.
+func interruptJobs(tx *gorm.DB, jobIDs []uuid.UUID, now time.Time, errMsg string) (int64, error) {
+	interrupted := map[string]interface{}{
+		"status":   "interrupted",
+		"ended_at": now,
+		"error":    errMsg,
+	}
+	unfinished := []string{"pending", "running"}
+
+	result := tx.Model(&db.Job{}).Where("id IN ?", jobIDs).Updates(interrupted)
+	if result.Error != nil {
+		return 0, fmt.Errorf("update jobs: %w", result.Error)
+	}
+	if err := tx.Model(&db.JobDestination{}).
+		Where("job_id IN ? AND status IN ?", jobIDs, unfinished).
+		Updates(interrupted).Error; err != nil {
+		return 0, fmt.Errorf("update job destinations: %w", err)
+	}
+	if err := tx.Model(&db.JobDestinationCommand{}).
+		Where("job_id IN ? AND status IN ?", jobIDs, unfinished).
+		Updates(interrupted).Error; err != nil {
+		return 0, fmt.Errorf("update job destination commands: %w", err)
+	}
+	// job_retention_tags has no "interrupted" status: a sweep that never
+	// finished is closed out as failed, carrying the job's error.
+	if err := tx.Model(&db.JobRetentionTag{}).
+		Where("job_id IN ? AND status IN ?", jobIDs, unfinished).
+		Updates(map[string]interface{}{
+			"status":   "failed",
+			"ended_at": now,
+			"error":    errMsg,
+		}).Error; err != nil {
+		return 0, fmt.Errorf("update job retention tags: %w", err)
+	}
+	// Release any destination lock these jobs held — an agent that vanished
+	// mid-operation must never leave a destination permanently locked out of
+	// future backups/retention (issue #130).
+	if err := tx.Where("job_id IN ?", jobIDs).Delete(&db.DestinationLock{}).Error; err != nil {
+		return 0, fmt.Errorf("release destination busy gate: %w", err)
+	}
+	return result.RowsAffected, nil
 }
 
 // JobWithNames extends db.Job with denormalised policy and agent names.
@@ -434,67 +437,10 @@ func (r *gormJobRepository) ListByPolicy(ctx context.Context, policyID uuid.UUID
 	return rows, total, nil
 }
 
-// ListByDestination returns a paginated list of jobs that touched a given
-// destination (via job_destinations), ordered by creation time descending.
-// Used by the destination detail page's "Recent Retention Runs"/job history,
-// and applies equally to backup jobs that included this destination.
-func (r *gormJobRepository) ListByDestination(ctx context.Context, destinationID uuid.UUID, opts ListOptions) ([]JobWithNames, int64, error) {
-	var total int64
-	if err := r.db.WithContext(ctx).
-		Model(&db.Job{}).
-		Joins("INNER JOIN job_destinations jd ON jd.job_id = jobs.id").
-		Where("jd.destination_id = ?", destinationID).
-		Count(&total).Error; err != nil {
-		return nil, 0, fmt.Errorf("jobs: list by destination count: %w", err)
-	}
-
-	var rows []JobWithNames
-	if err := r.db.WithContext(ctx).
-		Model(&db.Job{}).
-		Select(listJobsJoin).
-		Joins("INNER JOIN job_destinations jd ON jd.job_id = jobs.id").
-		Joins("LEFT JOIN policies ON policies.id = jobs.policy_id AND policies.deleted_at IS NULL").
-		Joins("LEFT JOIN agents ON agents.id = jobs.agent_id AND agents.deleted_at IS NULL").
-		Where("jd.destination_id = ?", destinationID).
-		Limit(opts.Limit).
-		Offset(opts.Offset).
-		Order("jobs.created_at DESC").
-		Scan(&rows).Error; err != nil {
-		return nil, 0, fmt.Errorf("jobs: list by destination: %w", err)
-	}
-
-	return rows, total, nil
-}
-
-// ListByAgent returns a paginated list of jobs for a given agent,
-// with policy and agent names, ordered by creation time descending.
-func (r *gormJobRepository) ListByAgent(ctx context.Context, agentID uuid.UUID, opts ListOptions) ([]JobWithNames, int64, error) {
-	var total int64
-	if err := r.db.WithContext(ctx).Model(&db.Job{}).Where("agent_id = ?", agentID).Count(&total).Error; err != nil {
-		return nil, 0, fmt.Errorf("jobs: list by agent count: %w", err)
-	}
-
-	var rows []JobWithNames
-	if err := r.db.WithContext(ctx).
-		Model(&db.Job{}).
-		Select(listJobsJoin).
-		Joins("LEFT JOIN policies ON policies.id = jobs.policy_id AND policies.deleted_at IS NULL").
-		Joins("LEFT JOIN agents ON agents.id = jobs.agent_id AND agents.deleted_at IS NULL").
-		Where("jobs.agent_id = ?", agentID).
-		Limit(opts.Limit).
-		Offset(opts.Offset).
-		Order("jobs.created_at DESC").
-		Scan(&rows).Error; err != nil {
-		return nil, 0, fmt.Errorf("jobs: list by agent: %w", err)
-	}
-
-	return rows, total, nil
-}
-
 // ListByAgentAndStatus returns jobs for an agent that are in the given status,
 // oldest first, with policy and agent names.
 //
-// Filtering in SQL matters here: callers that reach for ListByAgent and filter in
+// Filtering in SQL matters here: callers that list an agent's jobs and filter in
 // Go only ever see the most recent page of jobs, so on an agent with a long
 // history an older job in the wanted status is silently never found.
 // Oldest-first because these are work queues — a pending job created earlier
@@ -516,57 +462,64 @@ func (r *gormJobRepository) ListByAgentAndStatus(ctx context.Context, agentID uu
 	return rows, nil
 }
 
-// HasJobForPolicyAfter reports whether the policy has a job created strictly
-// after the given time. Used to decide against resuming an interrupted backup
-// that a later scheduled run has already superseded.
+// HasJobForPolicyAfter reports whether the policy has a backup job created
+// strictly after the given time. Used to decide against resuming an interrupted
+// backup that a later scheduled run has already superseded. Restores also carry
+// the policy ID but supersede nothing, so only backups count.
 func (r *gormJobRepository) HasJobForPolicyAfter(ctx context.Context, policyID uuid.UUID, after time.Time) (bool, error) {
 	var count int64
 	if err := r.db.WithContext(ctx).
 		Model(&db.Job{}).
-		Where("policy_id = ? AND created_at > ?", policyID, after).
+		Where("policy_id = ? AND type = ? AND created_at > ?", policyID, "backup", after).
 		Count(&count).Error; err != nil {
 		return false, fmt.Errorf("jobs: has job for policy after: %w", err)
 	}
 	return count > 0, nil
 }
 
-// ListFiltered returns a paginated list of jobs filtered by any combination of
-// status and type. Zero-valued fields in filter are ignored (no constraint added).
+// ListFiltered returns a paginated list of jobs matching every non-zero field
+// of filter. A zero filter lists all jobs.
 func (r *gormJobRepository) ListFiltered(ctx context.Context, filter JobFilter, opts ListOptions) ([]JobWithNames, int64, error) {
-	countQ := r.db.WithContext(ctx).Model(&db.Job{})
-	if filter.Status != "" {
-		countQ = countQ.Where("status = ?", filter.Status)
-	}
-	if filter.Type != "" {
-		countQ = countQ.Where("type = ?", filter.Type)
-	}
-
 	var total int64
-	if err := countQ.Count(&total).Error; err != nil {
+	if err := applyJobFilter(r.db.WithContext(ctx).Model(&db.Job{}), filter).
+		Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("jobs: list filtered count: %w", err)
 	}
 
-	listQ := r.db.WithContext(ctx).
-		Model(&db.Job{}).
+	var rows []JobWithNames
+	if err := applyJobFilter(r.db.WithContext(ctx).Model(&db.Job{}), filter).
 		Select(listJobsJoin).
 		Joins("LEFT JOIN policies ON policies.id = jobs.policy_id AND policies.deleted_at IS NULL").
 		Joins("LEFT JOIN agents ON agents.id = jobs.agent_id AND agents.deleted_at IS NULL").
 		Limit(opts.Limit).
 		Offset(opts.Offset).
-		Order("jobs.created_at DESC")
-	if filter.Status != "" {
-		listQ = listQ.Where("jobs.status = ?", filter.Status)
-	}
-	if filter.Type != "" {
-		listQ = listQ.Where("jobs.type = ?", filter.Type)
-	}
-
-	var rows []JobWithNames
-	if err := listQ.Scan(&rows).Error; err != nil {
+		Order("jobs.created_at DESC").
+		Scan(&rows).Error; err != nil {
 		return nil, 0, fmt.Errorf("jobs: list filtered: %w", err)
 	}
 
 	return rows, total, nil
+}
+
+// applyJobFilter adds a WHERE clause on the jobs table for every non-zero
+// field of filter.
+func applyJobFilter(q *gorm.DB, filter JobFilter) *gorm.DB {
+	if filter.Status != "" {
+		q = q.Where("jobs.status = ?", filter.Status)
+	}
+	if filter.Type != "" {
+		q = q.Where("jobs.type = ?", filter.Type)
+	}
+	if filter.PolicyID != nil {
+		q = q.Where("jobs.policy_id = ?", *filter.PolicyID)
+	}
+	if filter.AgentID != nil {
+		q = q.Where("jobs.agent_id = ?", *filter.AgentID)
+	}
+	if filter.DestinationID != nil {
+		q = q.Where("EXISTS (SELECT 1 FROM job_destinations jd WHERE jd.job_id = jobs.id AND jd.destination_id = ?)", *filter.DestinationID)
+	}
+	return q
 }
 
 // ListByType returns a paginated list of jobs filtered by type ("backup" or
@@ -774,7 +727,7 @@ func (r *gormJobRepository) BulkCreateLogs(ctx context.Context, logs []db.JobLog
 	return nil
 }
 
-// HasPendingJob reports whether any job with status "pending" or "waiting"
+// HasPendingJob reports whether a backup job with status "pending" or "waiting"
 // exists for the given policy. Used by the scheduler to avoid creating
 // duplicate jobs while one has not started yet — the agent is offline, or its
 // destinations are busy (issue #285): at most one such job per policy is
@@ -783,13 +736,28 @@ func (r *gormJobRepository) HasPendingJob(ctx context.Context, policyID uuid.UUI
 	var count int64
 	err := r.db.WithContext(ctx).
 		Model(&db.Job{}).
-		Where("policy_id = ? AND status IN ?", policyID, []string{"pending", "waiting"}).
+		Where("policy_id = ? AND type = ? AND status IN ?", policyID, "backup", []string{"pending", "waiting"}).
 		Limit(1).
 		Count(&count).Error
 	if err != nil {
 		return false, fmt.Errorf("jobs: has pending job: %w", err)
 	}
 	return count > 0, nil
+}
+
+// ListPendingBefore returns up to limit jobs still "pending" whose status last
+// changed before cutoff, oldest first: jobs whose agent was offline, or never
+// started them, for longer than the queue timeout (issue #325).
+func (r *gormJobRepository) ListPendingBefore(ctx context.Context, cutoff time.Time, limit int) ([]db.Job, error) {
+	var jobs []db.Job
+	if err := r.db.WithContext(ctx).
+		Where("status = ? AND updated_at < ?", "pending", cutoff).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&jobs).Error; err != nil {
+		return nil, fmt.Errorf("jobs: list pending before: %w", err)
+	}
+	return jobs, nil
 }
 
 // ListWaiting returns up to limit jobs in status "waiting", oldest first: the
@@ -807,19 +775,23 @@ func (r *gormJobRepository) ListWaiting(ctx context.Context, limit int) ([]db.Jo
 }
 
 // HasWaitingForDestinations reports whether a waiting job other than
-// excludeJobID still needs any of destinationIDs.
-func (r *gormJobRepository) HasWaitingForDestinations(ctx context.Context, destinationIDs []uuid.UUID, excludeJobID uuid.UUID) (bool, error) {
+// excludeJobID still needs any of destinationIDs in a mode that conflicts with
+// mode: any waiting job for an exclusive claim, only a waiting exclusive job
+// (any type but backup, see db.LockModeFor) for a shared one (issue #319).
+func (r *gormJobRepository) HasWaitingForDestinations(ctx context.Context, destinationIDs []uuid.UUID, excludeJobID uuid.UUID, mode string) (bool, error) {
 	if len(destinationIDs) == 0 {
 		return false, nil
 	}
-	var count int64
-	err := r.db.WithContext(ctx).
+	query := r.db.WithContext(ctx).
 		Model(&db.JobDestination{}).
 		Joins("INNER JOIN jobs ON jobs.id = job_destinations.job_id").
 		Where("jobs.status = ? AND jobs.id <> ? AND job_destinations.status = ? AND job_destinations.destination_id IN ?",
-			"waiting", excludeJobID, "pending", destinationIDs).
-		Limit(1).
-		Count(&count).Error
+			"waiting", excludeJobID, "pending", destinationIDs)
+	if mode == db.LockShared {
+		query = query.Where("jobs.type <> ?", "backup")
+	}
+	var count int64
+	err := query.Limit(1).Count(&count).Error
 	if err != nil {
 		return false, fmt.Errorf("jobs: has waiting for destinations: %w", err)
 	}

@@ -222,9 +222,9 @@ release:
 
   footer: |
     {{- with envOrDefault "CONTRIBUTORS" "" }}
-    ## ❤️ Contributors
+    ## ❤️ New Contributors
 
-    Thanks to everyone who contributed to this release: {{ . }}
+    Welcome and thanks to the first-time contributors of this release: {{ . }}
     {{ end }}
     ## 🔐 Verify
 

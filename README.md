@@ -380,6 +380,8 @@ precedence over environment variables when both are provided.
 | `--base-url` | `ARKEEP_BASE_URL` | — | External URL of the server (e.g. `https://arkeep.example.com`). Used to build links in outbound email (password reset). **Required for self-service password reset**: when unset, reset emails are disabled and users must ask an administrator. Links are never derived from request headers, to prevent password reset poisoning via a forged `Host` / `X-Forwarded-Host`. |
 | `--log-level` | `ARKEEP_LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
 | `--secure-cookies` | `ARKEEP_SECURE_COOKIES` | `false` | Set `Secure` flag on auth cookies (enable in production over HTTPS) |
+| `--trusted-proxies` | `ARKEEP_TRUSTED_PROXIES` | *(loopback and private networks)* | Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` is trusted for the client address, used by login rate limits and the audit log. `none` trusts no proxy. Narrow it to your proxy's address if clients can reach the server directly from a private network. |
+| `--metrics-token` | `ARKEEP_METRICS_TOKEN` | *(empty)* | When set, `/metrics` requires `Authorization: Bearer <token>` (Prometheus `authorization` / `bearer_token` scrape option). When empty, `/metrics` is public. |
 | `--telemetry` | `ARKEEP_TELEMETRY` | `true` | Send anonymous usage stats (opt-out) |
 | `--grpc-insecure` | `ARKEEP_GRPC_INSECURE` | `false` | Disable TLS for gRPC transport — development and same-machine deployments only |
 
@@ -408,7 +410,7 @@ postgres://arkeep:password@localhost:5432/arkeep?sslmode=require
 | `--state-dir` | `ARKEEP_STATE_DIR` | `~/.arkeep` | Directory for agent state and extracted binaries |
 | `--docker-socket` | `ARKEEP_DOCKER_SOCKET` | *(platform default)* | Docker socket path |
 | `--log-level` | `ARKEEP_LOG_LEVEL` | `info` | Log level |
-| `--server-http-addr` | `ARKEEP_SERVER_HTTP_ADDR` | *(derived from `--server-addr`)* | Base URL of the server HTTP API used for enrollment. **Required when the server is behind a TLS-terminating reverse proxy** (e.g. `https://arkeep.example.com`). Default: `--server-addr` host with port 8080 over plain HTTP. |
+| `--server-http-addr` | `ARKEEP_SERVER_HTTP_ADDR` | *(derived from `--server-addr`)* | Base URL of the server HTTP API used for enrollment. **Required when the server is behind a TLS-terminating reverse proxy** (e.g. `https://arkeep.example.com`). Default: `--server-addr` host with port 8080 over plain HTTP. The agent generates its private key and sends only a certificate request, but over plain HTTP the agent secret travels in clear and the CA certificate cannot be authenticated, so prefer an `https://` URL when the server is reachable over HTTPS. |
 | `--grpc-tls-ca` | `ARKEEP_GRPC_TLS_CA` | — | Path to CA certificate for gRPC TLS (only needed when the server uses an external, non-system-trusted cert) |
 | `--grpc-insecure` | `ARKEEP_GRPC_INSECURE` | `false` | Disable TLS for gRPC transport — development and same-machine deployments only |
 | `--docker-host-root` | `ARKEEP_DOCKER_HOST_ROOT` | `/hostfs` (auto-detected inside Docker) | Container path where the host filesystem is mounted. Auto-defaults to `/hostfs` inside Docker — no configuration required. Set only when using a custom mount point. See [Local destinations in Docker](#local-destinations-in-docker). |
