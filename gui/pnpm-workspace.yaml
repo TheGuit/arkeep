@@ -15,6 +15,3 @@ minimumReleaseAgeExclude:
   - vue@3.5.38
   - zod@4.6.6
   - '@tanstack/virtual-core@3.19.0'
-permissions:
-  '@tanstack/vue-table':
-    skills: true
