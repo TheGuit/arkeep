@@ -11,6 +11,10 @@
 #   agent/scripts/update-deps-pins.sh                 # latest upstream releases
 #   agent/scripts/update-deps-pins.sh 0.19.1 1.75.2   # explicit restic, rclone versions
 #
+# Without explicit versions, a release younger than MIN_RELEASE_AGE_DAYS
+# (default 7, the same cooldown as Dependabot) is skipped and the version
+# currently pinned in deps.json is kept.
+#
 # Requires: bash, curl, gpg, python3. Used by .github/workflows/deps-pins.yml.
 set -euo pipefail
 
@@ -30,8 +34,30 @@ trap 'rm -rf "$work"' EXIT
 export GNUPGHOME="$work/gnupg"
 mkdir -m 700 "$GNUPGHOME"
 
-restic_version="${1:-$(curl -fsSL https://api.github.com/repos/restic/restic/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].lstrip("v"))')}"
-rclone_version="${2:-$(curl -fsSL https://downloads.rclone.org/version.txt | sed 's/^rclone v//')}"
+# latest_or_current <github repo> <tool key in deps.json> — prints the latest
+# release version if it is at least MIN_RELEASE_AGE_DAYS old, else the version
+# already pinned.
+latest_or_current() {
+  curl -fsSL ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
+    "https://api.github.com/repos/$1/releases/latest" |
+    python3 -c '
+import datetime, json, os, sys
+release = json.load(sys.stdin)
+key, pins = sys.argv[1], sys.argv[2]
+min_age = int(os.environ.get("MIN_RELEASE_AGE_DAYS", "7"))
+published = datetime.datetime.fromisoformat(release["published_at"].replace("Z", "+00:00"))
+age = (datetime.datetime.now(datetime.timezone.utc) - published).days
+latest = release["tag_name"].lstrip("v")
+if age >= min_age or not os.path.exists(pins):
+    print(latest)
+else:
+    print(f"{key} {latest} is {age} days old, keeping the pinned version", file=sys.stderr)
+    print(json.load(open(pins))[key]["version"])
+' "$2" "$out"
+}
+
+restic_version="${1:-$(latest_or_current restic/restic restic)}"
+rclone_version="${2:-$(latest_or_current rclone/rclone rclone)}"
 
 fetch_key() {
   local fpr=$1
