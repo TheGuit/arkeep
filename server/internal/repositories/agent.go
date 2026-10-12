@@ -121,8 +121,25 @@ func (r *gormAgentRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-// List returns a paginated list of agents and the total count.
-// Soft-deleted agents are excluded from results.
+// agentSortColumns are the sortable columns of the agents list (issue #320).
+// Text columns sort case-insensitively; an agent never seen sorts last.
+var agentSortColumns = map[string]sortColumn{
+	"name":      {exprs: []string{"LOWER(name)"}},
+	"hostname":  {exprs: []string{"LOWER(hostname)"}},
+	"os":        {exprs: []string{"os", "arch"}},
+	"version":   {exprs: []string{"version"}},
+	"status":    {exprs: []string{"status"}},
+	"last_seen": {exprs: []string{"last_seen_at"}, nullable: true},
+}
+
+// agentOrderClause maps ListOptions.SortBy to a safe ORDER BY clause (see
+// orderClause), by name when unset or unknown.
+func agentOrderClause(opts ListOptions) string {
+	return orderClause(opts, agentSortColumns, "LOWER(name) ASC", "id ASC")
+}
+
+// List returns a paginated list of agents and the total count, ordered by
+// opts (see agentOrderClause). Soft-deleted agents are excluded from results.
 func (r *gormAgentRepository) List(ctx context.Context, opts ListOptions) ([]db.Agent, int64, error) {
 	var agents []db.Agent
 	var total int64
@@ -134,7 +151,7 @@ func (r *gormAgentRepository) List(ctx context.Context, opts ListOptions) ([]db.
 	if err := r.db.WithContext(ctx).
 		Limit(opts.Limit).
 		Offset(opts.Offset).
-		Order("created_at ASC").
+		Order(agentOrderClause(opts)).
 		Find(&agents).Error; err != nil {
 		return nil, 0, fmt.Errorf("agents: list: %w", err)
 	}
@@ -168,7 +185,7 @@ func (r *gormAgentRepository) ListFiltered(ctx context.Context, filter AgentFilt
 	listQ := r.db.WithContext(ctx).
 		Limit(opts.Limit).
 		Offset(opts.Offset).
-		Order("created_at ASC")
+		Order(agentOrderClause(opts))
 	if filter.Search != "" {
 		listQ = listQ.Where("name LIKE ?", "%"+filter.Search+"%")
 	}

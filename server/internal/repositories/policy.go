@@ -109,7 +109,17 @@ func (r *gormPolicyRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	})
 }
 
-// List returns a paginated list of policies and the total count.
+// policySortColumns are the sortable columns of the policies list (issue
+// #320). "agent" sorts by the agent's name, from the agents table List joins
+// for it. Text columns sort case-insensitively.
+var policySortColumns = map[string]sortColumn{
+	"name":   {exprs: []string{"LOWER(policies.name)"}},
+	"agent":  {exprs: []string{"LOWER(agents.name)"}},
+	"status": {exprs: []string{"policies.enabled"}},
+}
+
+// List returns a paginated list of policies and the total count, ordered by
+// opts.SortBy (see policySortColumns), by name when unset or unknown.
 // Soft-deleted policies are excluded from results.
 func (r *gormPolicyRepository) List(ctx context.Context, opts ListOptions) ([]db.Policy, int64, error) {
 	var policies []db.Policy
@@ -119,11 +129,16 @@ func (r *gormPolicyRepository) List(ctx context.Context, opts ListOptions) ([]db
 		return nil, 0, fmt.Errorf("policies: list count: %w", err)
 	}
 
-	if err := r.db.WithContext(ctx).
+	listQ := r.db.WithContext(ctx).
 		Limit(opts.Limit).
 		Offset(opts.Offset).
-		Order("created_at ASC").
-		Find(&policies).Error; err != nil {
+		Order(orderClause(opts, policySortColumns, "LOWER(policies.name) ASC", "policies.id ASC"))
+	if opts.SortBy == "agent" {
+		// LEFT JOIN on the raw table: a policy of a soft-deleted agent is
+		// still listed.
+		listQ = listQ.Select("policies.*").Joins("LEFT JOIN agents ON agents.id = policies.agent_id")
+	}
+	if err := listQ.Find(&policies).Error; err != nil {
 		return nil, 0, fmt.Errorf("policies: list: %w", err)
 	}
 

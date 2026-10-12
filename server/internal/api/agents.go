@@ -81,9 +81,10 @@ type listAgentsResponse struct {
 
 // List handles GET /api/v1/agents.
 // Returns a paginated list of agents. Soft-deleted agents are excluded.
-// Supports an optional ?search= query parameter for substring name filtering.
+// Supports an optional ?search= query parameter for substring name filtering,
+// and ?sort= (name, hostname, os, version, status, last_seen) with ?order=desc.
 func (h *AgentHandler) List(w http.ResponseWriter, r *http.Request) {
-	opts := paginationOpts(r)
+	opts := sortedPaginationOpts(r)
 
 	var agents []db.Agent
 	var total int64
@@ -373,4 +374,15 @@ func paginationOpts(r *http.Request) repositories.ListOptions {
 	}
 
 	return repositories.ListOptions{Limit: limit, Offset: offset}
+}
+
+// sortedPaginationOpts is paginationOpts plus the optional ?sort= and
+// ?order=desc parameters of the lists that can be sorted. The sort key is
+// validated against a whitelist in the repository layer; an unknown one falls
+// back to the list's default order.
+func sortedPaginationOpts(r *http.Request) repositories.ListOptions {
+	opts := paginationOpts(r)
+	opts.SortBy = r.URL.Query().Get("sort")
+	opts.SortDesc = r.URL.Query().Get("order") == "desc"
+	return opts
 }

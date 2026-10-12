@@ -139,8 +139,9 @@ type listPoliciesResponse struct {
 // List handles GET /api/v1/policies.
 // Destinations are not preloaded in list view to keep the query lightweight.
 // Use GET /api/v1/policies/{id} to retrieve a single policy with destinations.
+// Supports ?sort= (name, agent, status) with ?order=desc.
 func (h *PolicyHandler) List(w http.ResponseWriter, r *http.Request) {
-	opts := paginationOpts(r)
+	opts := sortedPaginationOpts(r)
 
 	policies, total, err := h.repo.List(r.Context(), opts)
 	if err != nil {
