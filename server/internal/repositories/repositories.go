@@ -152,6 +152,17 @@ type AgentRepository interface {
 	List(ctx context.Context, opts ListOptions) ([]db.Agent, int64, error)
 	ListFiltered(ctx context.Context, filter AgentFilter, opts ListOptions) ([]db.Agent, int64, error)
 
+	// GetByCertFingerprint returns the live agent bound to the given client
+	// certificate fingerprint, or ErrNotFound.
+	GetByCertFingerprint(ctx context.Context, fingerprint string) (*db.Agent, error)
+	// BindCertFingerprint binds an unbound agent to a client certificate.
+	// Returns false when the agent is already bound (or does not exist), so
+	// two certificates racing to bind the same agent cannot both win.
+	BindCertFingerprint(ctx context.Context, id uuid.UUID, fingerprint string) (bool, error)
+	// ResetCertFingerprint unbinds an agent: the next certificate that
+	// registers as it binds it again.
+	ResetCertFingerprint(ctx context.Context, id uuid.UUID) error
+
 	// TotalCount returns the count of all non-deleted agents in the database.
 	// Used by telemetry to report the registered agent count regardless of
 	// whether agents are currently connected.
@@ -253,6 +264,7 @@ type PolicyRepository interface {
 	ListByAgent(ctx context.Context, agentID uuid.UUID) ([]db.Policy, error)
 	ListEnabled(ctx context.Context) ([]db.Policy, error)
 	UpdateSchedule(ctx context.Context, id uuid.UUID, lastRunAt, nextRunAt time.Time) error
+	UpdateNextRunAt(ctx context.Context, id uuid.UUID, nextRunAt time.Time) error
 
 	// ActivePoliciesCount returns the count of enabled, non-deleted policies.
 	// Used by telemetry.
@@ -276,8 +288,11 @@ type PolicyRepository interface {
 // JobFilter restricts the result set returned by JobRepository.ListFiltered.
 // Zero values mean "no filter" for that field.
 type JobFilter struct {
-	Status string // e.g. "pending", "running", "succeeded", "failed", "cancelled"
-	Type   string // e.g. "backup", "restore"
+	Status        string     // e.g. "pending", "running", "succeeded", "failed", "cancelled"
+	Type          string     // e.g. "backup", "restore"
+	PolicyID      *uuid.UUID // jobs of this policy
+	AgentID       *uuid.UUID // jobs run by this agent
+	DestinationID *uuid.UUID // jobs that wrote to or swept this destination
 }
 
 type JobRepository interface {
@@ -293,7 +308,6 @@ type JobRepository interface {
 	ListFiltered(ctx context.Context, filter JobFilter, opts ListOptions) ([]JobWithNames, int64, error)
 	ListByType(ctx context.Context, jobType string, opts ListOptions) ([]JobWithNames, int64, error)
 	ListByPolicy(ctx context.Context, policyID uuid.UUID, opts ListOptions) ([]JobWithNames, int64, error)
-	ListByAgent(ctx context.Context, agentID uuid.UUID, opts ListOptions) ([]JobWithNames, int64, error)
 	ListByAgentAndStatus(ctx context.Context, agentID uuid.UUID, jobStatus string, opts ListOptions) ([]JobWithNames, error)
 	HasJobForPolicyAfter(ctx context.Context, policyID uuid.UUID, after time.Time) (bool, error)
 	HasPendingJob(ctx context.Context, policyID uuid.UUID) (bool, error)
@@ -303,6 +317,9 @@ type JobRepository interface {
 	//
 	// ListWaiting returns waiting jobs oldest first — the queue order.
 	ListWaiting(ctx context.Context, limit int) ([]db.Job, error)
+	// ListPendingBefore returns pending jobs whose status last changed before
+	// cutoff, oldest first — the ones the queue timeout fails (issue #325).
+	ListPendingBefore(ctx context.Context, cutoff time.Time, limit int) ([]db.Job, error)
 	// HasWaitingForDestinations reports whether a waiting job other than
 	// excludeJobID needs any of the given destinations, so a new job queues
 	// behind it instead of overtaking it.
@@ -331,7 +348,6 @@ type JobRepository interface {
 	CreateRetentionTag(ctx context.Context, t *db.JobRetentionTag) error
 	UpdateRetentionTagStatus(ctx context.Context, jobID, destID uuid.UUID, tag, status string, startedAt, endedAt *time.Time, errMsg string) error
 	ListRetentionTagsByJob(ctx context.Context, jobID uuid.UUID) ([]db.JobRetentionTag, error)
-	ListByDestination(ctx context.Context, destinationID uuid.UUID, opts ListOptions) ([]JobWithNames, int64, error)
 
 	// JobLog
 	BulkCreateLogs(ctx context.Context, logs []db.JobLog) error

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -247,6 +248,95 @@ func TestResumeInterrupted_Skips(t *testing.T) {
 				t.Errorf("interrupted job status = %q, want %q", original.Status, tt.wantOriginalStatus)
 			}
 		})
+	}
+}
+
+// addRestoreJob creates a restore job on the fixture's policy, created offset
+// from the interrupted job. Restores carry the PolicyID of the snapshot they
+// restore, so they share the policy with the backups.
+func addRestoreJob(t *testing.T, gdb *gorm.DB, f *resumeFixture, status string, offset time.Duration) {
+	t.Helper()
+	restore := &db.Job{
+		PolicyID: &f.policy.ID,
+		AgentID:  f.agentID,
+		Type:     "restore",
+		Status:   status,
+	}
+	if err := gdb.Create(restore).Error; err != nil {
+		t.Fatalf("create restore job: %v", err)
+	}
+	if err := gdb.Model(restore).Update("created_at", f.job.CreatedAt.Add(offset)).Error; err != nil {
+		t.Fatalf("set restore created_at: %v", err)
+	}
+}
+
+// TestResumeInterrupted_IgnoresRestores guards against restores of the policy's
+// snapshots blocking the resume of an interrupted backup: a pending restore is
+// not a pending backup, and a later restore does not supersede the backup.
+func TestResumeInterrupted_IgnoresRestores(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		offset time.Duration
+	}{
+		{name: "an older restore is pending", status: "pending", offset: -time.Hour},
+		{name: "a newer restore exists", status: "succeeded", offset: time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, gdb, policies, jobs := newTestScheduler(t)
+			f := newResumeFixture(t, gdb, policies, jobs)
+			addRestoreJob(t, gdb, f, tt.status, tt.offset)
+
+			s.ResumeInterrupted(context.Background(), f.agentID)
+
+			resumed := 0
+			for _, j := range jobsForPolicy(t, gdb, f.policy.ID) {
+				if j.ResumeOfJobID != nil && *j.ResumeOfJobID == f.job.ID {
+					resumed++
+				}
+			}
+			if resumed != 1 {
+				t.Errorf("found %d resume jobs, want 1", resumed)
+			}
+		})
+	}
+}
+
+// TestTriggerNow_PendingRestoreDoesNotBlockBackup guards against a restore
+// waiting for its agent suppressing the policy's backups.
+func TestTriggerNow_PendingRestoreDoesNotBlockBackup(t *testing.T) {
+	s, gdb, policies, jobs := newTestScheduler(t)
+	f := newResumeFixture(t, gdb, policies, jobs)
+	addRestoreJob(t, gdb, f, "pending", time.Minute)
+
+	job, err := s.TriggerNow(context.Background(), f.policy.ID)
+	if err != nil {
+		t.Fatalf("TriggerNow: %v", err)
+	}
+	if job == nil {
+		t.Fatal("TriggerNow returned no job: the pending restore suppressed the backup")
+	}
+	if job.Type != "backup" {
+		t.Errorf("job Type = %q, want \"backup\"", job.Type)
+	}
+}
+
+// TestTriggerNow_PendingBackupStillDeduplicates keeps the original guard: at
+// most one not-yet-started backup per policy.
+func TestTriggerNow_PendingBackupStillDeduplicates(t *testing.T) {
+	s, gdb, policies, jobs := newTestScheduler(t)
+	f := newResumeFixture(t, gdb, policies, jobs)
+	if err := gdb.Model(f.job).Update("status", "pending").Error; err != nil {
+		t.Fatalf("mark job pending: %v", err)
+	}
+
+	job, err := s.TriggerNow(context.Background(), f.policy.ID)
+	if !errors.Is(err, ErrJobAlreadyQueued) {
+		t.Errorf("TriggerNow error = %v, want ErrJobAlreadyQueued", err)
+	}
+	if job != nil {
+		t.Errorf("TriggerNow created job %s, want none: a backup is already pending", job.ID)
 	}
 }
 
@@ -573,5 +663,235 @@ func TestTriggerNow_AlreadyQueued(t *testing.T) {
 
 	if _, err := q.s.TriggerNow(ctx, q.f.policy.ID); !errors.Is(err, ErrJobAlreadyQueued) {
 		t.Errorf("second TriggerNow error = %v, want ErrJobAlreadyQueued", err)
+	}
+}
+
+// TestScheduledRunAdvancesNextRunAt covers issue #321: after a scheduled run the
+// policy's next_run_at must point at the next cron firing, not be left equal to
+// last_run_at (which made the UI show NEXT RUN == LAST RUN for hourly schedules).
+func TestScheduledRunAdvancesNextRunAt(t *testing.T) {
+	s, gdb, policies, _ := newTestScheduler(t)
+	ctx := context.Background()
+
+	agent := &db.Agent{Name: "test-agent", Status: "online", Labels: "{}"}
+	if err := repositories.NewAgentRepository(gdb).Create(ctx, agent); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	policy := &db.Policy{
+		Name:              "hourly-policy",
+		AgentID:           agent.ID,
+		Schedule:          "0 * * * *", // hourly, on the top of the hour
+		Enabled:           true,
+		Sources:           `["/data"]`,
+		RepoPassword:      db.EncryptedString("repo-secret"),
+		ResumeInterrupted: true,
+	}
+	if err := policies.Create(ctx, policy); err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+
+	if _, err := s.createAndDispatch(policy, nil, nil); err != nil {
+		t.Fatalf("createAndDispatch: %v", err)
+	}
+
+	stored, err := policies.GetByID(ctx, policy.ID)
+	if err != nil {
+		t.Fatalf("GetByID(policy): %v", err)
+	}
+	if stored.LastRunAt == nil {
+		t.Fatal("policy LastRunAt = nil, want it set after a scheduled run")
+	}
+	if stored.NextRunAt == nil {
+		t.Fatal("policy NextRunAt = nil, want it set after a scheduled run")
+	}
+	if !stored.NextRunAt.After(*stored.LastRunAt) {
+		t.Errorf("policy NextRunAt (%v) must be after LastRunAt (%v) for an hourly schedule",
+			*stored.NextRunAt, *stored.LastRunAt)
+	}
+	if d := stored.NextRunAt.Sub(*stored.LastRunAt); d <= 0 || d > time.Hour {
+		t.Errorf("NextRunAt-LastRunAt = %v, want in (0, 1h] for an hourly schedule", d)
+	}
+}
+
+// TestNextScheduledRunAt_UsesSchedulerLocation: gocron fires a schedule without
+// an explicit CRON_TZ in the scheduler's location (time.Local), so next_run_at
+// must be computed there too — computed in UTC, a "0 2 * * *" policy on a
+// server with TZ=Europe/Rome showed 02:00 UTC instead of 02:00 local time.
+func TestNextScheduledRunAt_UsesSchedulerLocation(t *testing.T) {
+	load := func(name string) *time.Location {
+		t.Helper()
+		loc, err := time.LoadLocation(name)
+		if err != nil {
+			t.Fatalf("LoadLocation(%q): %v", name, err)
+		}
+		return loc
+	}
+	now := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name     string
+		local    *time.Location
+		schedule string
+		want     time.Time
+	}{
+		{"daily in Europe/Rome", load("Europe/Rome"), "0 2 * * *", time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)},
+		{"hourly with a half-hour offset", load("Asia/Kolkata"), "0 * * * *", time.Date(2026, 10, 12, 10, 30, 0, 0, time.UTC)},
+		{"explicit CRON_TZ wins", load("Europe/Rome"), "CRON_TZ=UTC 0 2 * * *", time.Date(2026, 10, 13, 2, 0, 0, 0, time.UTC)},
+		{"descriptor", time.UTC, "@hourly", time.Date(2026, 10, 12, 11, 0, 0, 0, time.UTC)},
+		{"unparseable falls back to now", time.UTC, "not a schedule", now},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nextScheduledRunAt(tc.schedule, now, tc.local)
+			if !got.Equal(tc.want) {
+				t.Errorf("nextScheduledRunAt(%q) = %v, want %v", tc.schedule, got, tc.want)
+			}
+			if got.Location() != time.UTC {
+				t.Errorf("nextScheduledRunAt location = %v, want UTC", got.Location())
+			}
+		})
+	}
+}
+
+// newSchedulePolicy creates an enabled policy with schedule on a new agent.
+func newSchedulePolicy(t *testing.T, gdb *gorm.DB, policies repositories.PolicyRepository, schedule string) *db.Policy {
+	t.Helper()
+	ctx := context.Background()
+	agent := &db.Agent{Name: "agent-" + uuid.Must(uuid.NewV7()).String(), Status: "online", Labels: "{}"}
+	if err := repositories.NewAgentRepository(gdb).Create(ctx, agent); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	policy := &db.Policy{
+		Name:         "policy-" + uuid.Must(uuid.NewV7()).String(),
+		AgentID:      agent.ID,
+		Schedule:     schedule,
+		Enabled:      true,
+		Sources:      `[{"type":"directory","path":"/data"}]`,
+		RepoPassword: db.EncryptedString("repo-secret"),
+	}
+	if err := policies.Create(ctx, policy); err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+	return policy
+}
+
+// storedNextRunAt reads a policy's next_run_at back from the database.
+func storedNextRunAt(t *testing.T, policies repositories.PolicyRepository, id uuid.UUID) *time.Time {
+	t.Helper()
+	stored, err := policies.GetByID(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	return stored.NextRunAt
+}
+
+// TestAddPolicy_SetsNextRunAt: a new or re-enabled policy shows its next run
+// right away, not only after its first run (issue #321).
+func TestAddPolicy_SetsNextRunAt(t *testing.T) {
+	s, gdb, policies, _ := newTestScheduler(t)
+	policy := newSchedulePolicy(t, gdb, policies, "0 * * * *")
+
+	if err := s.AddPolicy(policy); err != nil {
+		t.Fatalf("AddPolicy: %v", err)
+	}
+
+	stored := storedNextRunAt(t, policies, policy.ID)
+	if stored == nil {
+		t.Fatal("stored NextRunAt = nil, want the next firing")
+	}
+	if d := time.Until(*stored); d <= 0 || d > time.Hour {
+		t.Errorf("stored NextRunAt in %v, want within the next hour", d)
+	}
+	if policy.NextRunAt == nil || !policy.NextRunAt.Equal(*stored) {
+		t.Errorf("policy.NextRunAt = %v, want the stored %v (the API responds with this struct)", policy.NextRunAt, *stored)
+	}
+}
+
+// TestUpdatePolicy_ScheduleChangeRefreshesNextRunAt: changing the schedule
+// moves next_run_at to the new schedule's next firing.
+func TestUpdatePolicy_ScheduleChangeRefreshesNextRunAt(t *testing.T) {
+	s, gdb, policies, _ := newTestScheduler(t)
+
+	// A daily slot always more than an hour away, in the scheduler's location.
+	daily := fmt.Sprintf("0 %d * * *", (time.Now().In(s.location).Hour()+12)%24)
+	policy := newSchedulePolicy(t, gdb, policies, daily)
+	if err := s.AddPolicy(policy); err != nil {
+		t.Fatalf("AddPolicy: %v", err)
+	}
+
+	policy.Schedule = "0 * * * *"
+	if err := s.UpdatePolicy(policy); err != nil {
+		t.Fatalf("UpdatePolicy: %v", err)
+	}
+
+	stored := storedNextRunAt(t, policies, policy.ID)
+	if stored == nil {
+		t.Fatal("stored NextRunAt = nil after a schedule change")
+	}
+	if d := time.Until(*stored); d <= 0 || d > time.Hour {
+		t.Errorf("stored NextRunAt in %v after switching to hourly, want within the next hour", d)
+	}
+}
+
+// TestRunJob_SkippedTickAdvancesNextRunAt: a tick skipped because a backup of
+// the policy is still queued must still move next_run_at to the next firing,
+// instead of leaving it in the past — without recording a run.
+func TestRunJob_SkippedTickAdvancesNextRunAt(t *testing.T) {
+	s, gdb, policies, jobs := newTestScheduler(t)
+	ctx := context.Background()
+	policy := newSchedulePolicy(t, gdb, policies, "0 * * * *")
+
+	past := time.Now().UTC().Add(-2 * time.Hour)
+	if err := policies.UpdateSchedule(ctx, policy.ID, past, past); err != nil {
+		t.Fatalf("UpdateSchedule: %v", err)
+	}
+	queued := &db.Job{PolicyID: &policy.ID, AgentID: policy.AgentID, Type: "backup", Status: "pending"}
+	if err := jobs.Create(ctx, queued); err != nil {
+		t.Fatalf("create pending job: %v", err)
+	}
+
+	job, err := s.runJob(policy, nil)
+	if err != nil || job != nil {
+		t.Fatalf("runJob = %v, %v; want a skipped tick (nil, nil)", job, err)
+	}
+
+	stored, err := policies.GetByID(ctx, policy.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if stored.NextRunAt == nil || !stored.NextRunAt.After(time.Now()) {
+		t.Errorf("NextRunAt = %v, want a future firing after a skipped tick", stored.NextRunAt)
+	}
+	if stored.LastRunAt == nil || !stored.LastRunAt.Equal(past) {
+		t.Errorf("LastRunAt = %v, want it left at %v: a skipped tick is not a run", stored.LastRunAt, past)
+	}
+}
+
+// TestRunJob_AfterPendingTimeout is the scenario of issue #325: a daily backup
+// whose job stays pending (agent offline) used to skip every later run in
+// silence. Once the queue timeout fails it, the next tick creates a new job.
+func TestRunJob_AfterPendingTimeout(t *testing.T) {
+	q := newQueueFixture(t)
+	ctx := context.Background()
+
+	stuck := &db.Job{PolicyID: &q.f.policy.ID, AgentID: q.f.agentID, Type: "backup", Status: "pending"}
+	if err := q.jobs.Create(ctx, stuck); err != nil {
+		t.Fatalf("create pending job: %v", err)
+	}
+	if job, err := q.s.runJob(q.f.policy, nil); err != nil || job != nil {
+		t.Fatalf("runJob with a pending job = %v, %v; want the tick skipped", job, err)
+	}
+
+	if err := q.gdb.Model(&db.Job{}).Where("id = ?", stuck.ID).UpdateColumn("updated_at", time.Now().UTC().Add(-25*time.Hour)).Error; err != nil {
+		t.Fatalf("backdate job: %v", err)
+	}
+	q.s.queue.Drain(ctx)
+	if got := q.status(stuck); got != "failed" {
+		t.Fatalf("stuck job status = %q, want \"failed\" after the timeout", got)
+	}
+
+	job, err := q.s.runJob(q.f.policy, nil)
+	if err != nil || job == nil {
+		t.Fatalf("runJob after the timeout = %v, %v; want a new job", job, err)
 	}
 }
