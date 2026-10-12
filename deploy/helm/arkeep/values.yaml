@@ -42,6 +42,11 @@ config:
   # in production).
   secureCookies: true
 
+  # Check GitHub (api.github.com) for new Arkeep releases to show the update
+  # indicator in the GUI. Set to false to never contact GitHub (air-gapped or
+  # egress-restricted clusters).
+  updateCheck: true
+
   # HTTP and gRPC listen addresses inside the container.
   # Change only if you have a specific reason — the Service ports below must match.
   httpAddr: ":8080"
