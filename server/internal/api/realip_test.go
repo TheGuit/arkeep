@@ -42,6 +42,7 @@ func TestRealIP(t *testing.T) {
 		{"chained trusted proxies are skipped", "127.0.0.1:4000", map[string]string{"X-Forwarded-For": "198.51.100.9, 10.0.0.3"}, "198.51.100.9"},
 		{"all hops private", "172.18.0.2:4000", map[string]string{"X-Forwarded-For": "192.168.1.50"}, "192.168.1.50"},
 		{"X-Real-IP fallback", "172.18.0.2:4000", map[string]string{"X-Real-IP": "198.51.100.9"}, "198.51.100.9"},
+		{"empty X-Forwarded-For falls back to X-Real-IP", "172.18.0.2:4000", map[string]string{"X-Forwarded-For": "", "X-Real-IP": "198.51.100.9"}, "198.51.100.9"},
 		{"garbage header keeps the peer", "172.18.0.2:4000", map[string]string{"X-Forwarded-For": "garbage"}, "172.18.0.2"},
 		{"IPv6 client", "[::1]:4000", map[string]string{"X-Forwarded-For": "2001:db8::7"}, "2001:db8::7"},
 	}
