@@ -107,9 +107,16 @@ func RealIP(trusted []netip.Prefix, logger *zap.Logger) func(http.Handler) http.
 
 // forwardedClient returns the client address a trusted proxy reported.
 func forwardedClient(r *http.Request, isTrusted func(netip.Addr) bool) (netip.Addr, bool) {
+	// Collect the hops, dropping blank entries: a header that is present but
+	// empty (some proxies emit "X-Forwarded-For:" with no value) must count as
+	// absent, so the X-Real-IP fallback below still applies.
 	var hops []string
 	for _, h := range r.Header.Values("X-Forwarded-For") {
-		hops = append(hops, strings.Split(h, ",")...)
+		for _, hop := range strings.Split(h, ",") {
+			if hop = strings.TrimSpace(hop); hop != "" {
+				hops = append(hops, hop)
+			}
+		}
 	}
 	if len(hops) == 0 {
 		if a, err := netip.ParseAddr(strings.TrimSpace(r.Header.Get("X-Real-IP"))); err == nil {
