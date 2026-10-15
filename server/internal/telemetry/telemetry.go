@@ -6,7 +6,7 @@
 // ID, Arkeep version, OS name, connected agent count, and active policy count.
 //
 // Telemetry is opt-out: set ARKEEP_TELEMETRY=false or --telemetry=false to
-// disable it. Aggregate stats are public at https://telemetry.arkeep.io/stats
+// disable it. Aggregate stats are public at https://telemetry.arkeep.io
 package telemetry
 
 import (
