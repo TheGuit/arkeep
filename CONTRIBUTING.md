@@ -29,7 +29,7 @@ This document covers everything you need to get your changes merged.
 
 ## Development Setup
 
-See the [Development section in README.md](README.md#development) for the full setup guide.
+See [Development setup](https://arkeep.io/docs/contributing/development/) in the docs for the full setup guide.
 The short version:
 
 ```bash

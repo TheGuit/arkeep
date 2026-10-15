@@ -216,7 +216,7 @@ release:
     docker pull ghcr.io/arkeep-io/arkeep-agent:{{ .Tag }}
     ```
 
-    Images are also published on Docker Hub (`arkeepio/arkeep-server`, `arkeepio/arkeep-agent`) for `linux/amd64` and `linux/arm64`. Standalone binaries — server for Linux and macOS, agent for Linux (amd64, arm64, armv7, mips, mipsle), macOS and Windows — are attached below. See the [README](https://github.com/arkeep-io/arkeep#readme) for Docker Compose and Helm setups.
+    Images are also published on Docker Hub (`arkeepio/arkeep-server`, `arkeepio/arkeep-agent`) for `linux/amd64` and `linux/arm64`. Standalone binaries — server for Linux and macOS, agent for Linux (amd64, arm64, armv7, mips, mipsle), macOS and Windows — are attached below. See the [installation docs](https://arkeep.io/docs/installation/docker-compose/) for Docker Compose, binary and Helm setups.
 
     ## 📝 What's Changed
 

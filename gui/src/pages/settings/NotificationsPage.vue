@@ -32,8 +32,8 @@ const settings = ref<NotificationSettings>({
     agent_online: false,
 })
 
-// Webhook — see README's "Configuring notifications" section, which already
-// documents this as living on this page.
+// Webhook — see the Notifications guide in the docs (arkeep.io/docs/guides/notifications/),
+// which already documents this as living on this page.
 const webhookExists = ref(false)
 const webhookEnabled = ref(false)
 const webhookUrl = ref('')
