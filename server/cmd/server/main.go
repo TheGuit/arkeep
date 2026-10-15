@@ -515,7 +515,7 @@ func run(ctx context.Context, cfg *config) error {
 				logger.Info("Arkeep collects anonymous usage statistics to help prioritize development.\n" +
 					"No personal data, backup contents, or credentials are ever transmitted.\n" +
 					"To opt out: set ARKEEP_TELEMETRY=false or --telemetry=false\n" +
-					"Public stats: https://telemetry.arkeep.io/stats")
+					"Public stats: https://telemetry.arkeep.io")
 			}
 			go reporter.Start(ctx)
 		}
