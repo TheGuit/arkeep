@@ -25,7 +25,13 @@ locks.
 - A job claims **all of its destinations in one transaction, or none**, which
   rules out deadlocks.
 - The queue is drained on events that may free a destination, plus a fallback
-  ticker. Jobs still pending after a configurable timeout fail.
+  ticker.
+- A **queue timeout** (Settings → Job Queue, 24 h by default, 0 disables it)
+  fails jobs that have not started in time, whether they are `waiting` for
+  their destinations or `pending` for their agent. A timed-out job is marked
+  failed and pings Healthchecks. It also sends the job-failed notification,
+  except when its agent is offline: the agent-offline notification already
+  covers that case.
 
 ## Consequences
 
@@ -45,4 +51,4 @@ locks.
 ## References
 
 - `server/internal/destqueue/`, `server/internal/repositories/destination.go`.
-- Issues #130, #285, #319, #325.
+- Issues #130, #285, #319, #325, #345.

@@ -25,9 +25,15 @@ to run a PKI, and agents must not be able to impersonate each other.
 - Each agent row records the **fingerprint of its client certificate**. Every
   RPC that names an agent, or reports on a job, must come from that agent's
   certificate.
-- An external certificate (`ARKEEP_GRPC_TLS_CERT`/`KEY`) and an insecure mode
-  (`ARKEEP_GRPC_INSECURE`) remain available. In both, agents share one secret
-  and no per-agent identity is enforced.
+- Two other modes remain available, and in both agents are authenticated by the
+  shared agent secret only, with no per-agent identity:
+  - an **external certificate** (`ARKEEP_GRPC_TLS_CERT`/`KEY`, e.g. from
+    Let's Encrypt): the connection is still TLS end to end between the agent
+    and the server;
+  - an **insecure mode** (`--grpc-insecure`, `ARKEEP_GRPC_INSECURE`), only for
+    agents on the same host or on a trusted private network.
+- With auto-PKI, the gRPC port (9090) must reach the server unchanged: a proxy
+  in front of it must pass TLS through, never terminate it.
 
 ## Consequences
 
@@ -36,8 +42,9 @@ to run a PKI, and agents must not be able to impersonate each other.
   agent. It must be protected accordingly.
 - Enrollment over plain HTTP exposes the secret and the CA certificate to a
   network attacker. HTTPS (or loopback) should be used for enrollment.
-- The external-certificate and insecure modes trade per-agent identity for
-  simpler setups behind TLS-terminating proxies or on a single machine.
+- The external-certificate mode trades per-agent identity for a certificate the
+  operator already manages. The insecure mode drops encryption as well, and is
+  only acceptable where the network itself is trusted.
 
 ## Alternatives considered
 
@@ -51,4 +58,6 @@ to run a PKI, and agents must not be able to impersonate each other.
 
 - `server/internal/grpc/certs.go`, `server/internal/grpc/identity.go`,
   `server/internal/api/enroll.go`, `agent/internal/connection/`.
-- `SECURITY.md`.
+- [Security](https://arkeep.io/docs/concepts/security/) and
+  [Reverse proxy and TLS](https://arkeep.io/docs/installation/reverse-proxy-tls/)
+  on arkeep.io/docs; `SECURITY.md`.

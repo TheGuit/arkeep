@@ -29,10 +29,11 @@ itself (reading files, running restic) has to happen on each machine.
 - Agents work behind NAT and firewalls without port forwarding or a VPN. Only
   the server needs to be reachable.
 - The server can only reach an agent while it is connected: jobs for an
-  offline agent wait or fail (see the pending-job timeout).
+  offline agent wait or fail (see the queue timeout in
+  [0010](0010-per-destination-locks-and-fifo-queue.md)).
 - Agents trust the server to send them work, which makes the server's security
   critical (see [0006](0006-auto-pki-and-per-agent-mtls.md) and
-  [0009](0009-hooks-run-on-the-agent-admin-only.md)).
+  [0009](0009-hooks-and-command-sources-run-on-the-agent-admin-only.md)).
 - Changes to `agent.proto` must stay compatible with agents of the previous
   release, which keep running during upgrades.
 
@@ -45,5 +46,6 @@ itself (reading files, running restic) has to happen on each machine.
 
 ## References
 
-- `README.md` → Architecture, FAQ "Why does the agent connect to the server".
+- [Architecture](https://arkeep.io/docs/concepts/architecture/) and
+  [FAQ](https://arkeep.io/docs/reference/faq/) on arkeep.io/docs.
 - `shared/proto/agent.proto`, `agent/internal/connection/`, `server/internal/grpc/`.

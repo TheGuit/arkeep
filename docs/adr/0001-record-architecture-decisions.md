@@ -6,12 +6,12 @@
 
 ## Context
 
-Arkeep's architecture decisions are spread across the README, `SECURITY.md`,
-`CONTRIBUTING.md`, package comments and pull request discussions. New
-contributors cannot easily tell which choices are deliberate, which are
-constraints they must respect, and why they were made. Reviewers end up
-re-explaining the same decisions, and a decision can be reversed by accident
-because nobody remembered it was one.
+Arkeep's architecture decisions are spread across the documentation site,
+`SECURITY.md`, `CONTRIBUTING.md`, package comments and pull request
+discussions. New contributors cannot easily tell which choices are deliberate,
+which are constraints they must respect, and why they were made. Reviewers end
+up re-explaining the same decisions, and a decision can be reversed by
+accident because nobody remembered it was one.
 
 ## Decision
 
@@ -37,8 +37,9 @@ We will record architecture decisions as Architecture Decision Records in
 
 ## Alternatives considered
 
-- **Keep decisions in the README and code comments** — they are mixed with
-  user documentation and do not record context, alternatives or status.
+- **Keep decisions in the user documentation and code comments** — they are
+  mixed with usage instructions and do not record context, alternatives or
+  status.
 - **ADR tooling (adr-tools, log4brains)** — adds a dependency for a task that a
   copied template handles just as well.
 

@@ -21,8 +21,7 @@ steps.
   release changelog groups.
 - Releases are cut by pushing a `v*` tag. **GoReleaser** then builds the server
   and agent binaries for every supported platform, multi-arch images on GHCR
-  and Docker Hub, the AUR package, `checksums.txt` and the GitHub release
-  notes.
+  and Docker Hub, `checksums.txt` and the GitHub release notes.
 
 ## Consequences
 

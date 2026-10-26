@@ -50,6 +50,6 @@ describe the architecture as implemented and are marked **Accepted**.
 | [0006](0006-auto-pki-and-per-agent-mtls.md) | Auto-PKI and per-agent mTLS identity | Accepted |
 | [0007](0007-encrypt-credentials-at-rest.md) | Encrypt credentials at rest, never return them | Accepted |
 | [0008](0008-short-lived-jwt-and-refresh-cookie-sessions.md) | Short-lived JWT access tokens with refresh cookies | Accepted |
-| [0009](0009-hooks-run-on-the-agent-admin-only.md) | Hooks run as shell commands on the agent, admin only | Accepted |
+| [0009](0009-hooks-and-command-sources-run-on-the-agent-admin-only.md) | Hooks and command sources run as shell commands on the agent, admin only | Accepted |
 | [0010](0010-per-destination-locks-and-fifo-queue.md) | Per-destination locks and a FIFO waiting queue | Accepted |
 | [0011](0011-go-monorepo-conventional-commits-goreleaser.md) | Go monorepo, Conventional Commits and GoReleaser releases | Accepted |

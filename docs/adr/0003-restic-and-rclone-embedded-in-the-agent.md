@@ -30,7 +30,8 @@ extra packages may be impossible.
 
 - No vendor lock-in: backups remain usable with the restic CLI alone.
 - The agent is a single file to deploy, with no runtime dependency to install.
-- The agent binary is large (about 100 MB per platform).
+- The agent binary is large: over 100 MB per platform, rclone alone
+  accounting for 75–90 MB.
 - Arkeep's security depends on the integrity of the embedded upstream
   binaries, which run with the agent's privileges. Their versions and
   integrity must be controlled at build time.
@@ -46,6 +47,5 @@ extra packages may be impossible.
 
 ## References
 
-- `README.md` → FAQ "Why Restic under the hood?", "Can I access my backups
-  without Arkeep?".
+- [FAQ](https://arkeep.io/docs/reference/faq/) on arkeep.io/docs.
 - `agent/internal/restic/`, `agent/scripts/download_deps.go`.

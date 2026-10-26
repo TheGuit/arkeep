@@ -41,5 +41,6 @@ these secrets away on their own.
 
 ## References
 
-- `SECURITY.md` → Credential storage, Two-factor authentication.
+- [Security](https://arkeep.io/docs/concepts/security/) on arkeep.io/docs;
+  `SECURITY.md` → Credential storage, Two-factor authentication.
 - `server/internal/db/encrypt.go`.
