@@ -241,7 +241,7 @@ func (d *Dispatcher) Drain(ctx context.Context) {
 		job := &waiting[i]
 
 		if timeout > 0 && now.Sub(job.UpdatedAt) >= timeout {
-			d.failTimedOut(ctx, job, TimeoutError)
+			d.failTimedOut(ctx, job, TimeoutError, true)
 			continue
 		}
 
@@ -384,7 +384,10 @@ func TimeoutMinutes(ctx context.Context, settings repositories.SettingsRepositor
 // agent was offline the whole time, or received the job and never started it.
 // Left pending, such a job silently held back every later run of its policy.
 // An agent that is connected is told to drop the job, in case it still sits
-// in its local queue. Releasing their destinations may unblock waiting jobs,
+// in its local queue. A job of an agent that is offline is not notified as
+// failed (issue #345): the agent offline notification already reported it, and
+// a powered-off machine is not a backup failure. Healthchecks is still pinged,
+// since the backup did not happen. Releasing their destinations may unblock waiting jobs,
 // which the drain that called this starts.
 func (d *Dispatcher) failStalePending(ctx context.Context, timeout time.Duration) {
 	stale, err := d.jobs.ListPendingBefore(ctx, time.Now().UTC().Add(-timeout), drainLimit)
@@ -394,10 +397,11 @@ func (d *Dispatcher) failStalePending(ctx context.Context, timeout time.Duration
 	}
 	for i := range stale {
 		job := &stale[i]
-		if !d.failTimedOut(ctx, job, PendingTimeoutError) {
+		connected := d.agents.IsConnected(job.AgentID.String())
+		if !d.failTimedOut(ctx, job, PendingTimeoutError, connected) {
 			continue
 		}
-		if !d.agents.IsConnected(job.AgentID.String()) {
+		if !connected {
 			continue
 		}
 		if err := d.agents.SendCancel(job.AgentID.String(), job.ID.String()); err != nil {
@@ -410,10 +414,10 @@ func (d *Dispatcher) failStalePending(ctx context.Context, timeout time.Duration
 }
 
 // failTimedOut closes a job that waited longer than the queue timeout with
-// errMsg, and reports it like any other failed backup: notification and
-// Healthchecks /fail ping. It reports whether the job was failed: false when it
-// had already started or ended meanwhile.
-func (d *Dispatcher) failTimedOut(ctx context.Context, job *db.Job, errMsg string) bool {
+// errMsg, and reports it like any other failed backup: Healthchecks /fail ping
+// and, when notify is set, job failed notification. It reports whether the job
+// was failed: false when it had already started or ended meanwhile.
+func (d *Dispatcher) failTimedOut(ctx context.Context, job *db.Job, errMsg string, notify bool) bool {
 	now := time.Now().UTC()
 	if err := d.jobs.UpdateStatus(ctx, job.ID, "failed", nil, &now, errMsg); err != nil {
 		if !errors.Is(err, repositories.ErrTerminalState) {
@@ -435,7 +439,7 @@ func (d *Dispatcher) failTimedOut(ctx context.Context, job *db.Job, errMsg strin
 	if d.pinger != nil {
 		go d.pinger.ReportJob(context.WithoutCancel(ctx), job.ID, "failed", errMsg)
 	}
-	if d.notifSvc != nil {
+	if notify && d.notifSvc != nil {
 		go d.notifyFailed(context.WithoutCancel(ctx), job.ID, errMsg)
 	}
 	return true

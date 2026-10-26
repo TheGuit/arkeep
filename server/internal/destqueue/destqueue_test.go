@@ -467,8 +467,10 @@ func (e *env) pendingJob(agent *db.Agent, status string, d *db.Destination, upda
 }
 
 // Issue #325: a job still pending after the queue timeout — its agent was
-// offline, or never started it — is failed and reported, the agent told to
-// drop it, and its destination released. Drain does this with no job waiting.
+// offline, or never started it — is failed, the agent told to drop it, and its
+// destination released. Drain does this with no job waiting. Only the job of
+// the connected agent is notified as failed (issue #345): the offline agent was
+// already reported by the agent offline notification.
 func TestDrain_StalePendingFails(t *testing.T) {
 	e := newEnv(t)
 	online := e.agent("online")
@@ -514,15 +516,18 @@ func TestDrain_StalePendingFails(t *testing.T) {
 	if got := e.holders(d); len(got) != 0 {
 		t.Errorf("holders = %v, want released", got)
 	}
-	for range 2 {
-		select {
-		case msg := <-notifier.failed:
-			if msg != PendingTimeoutError {
-				t.Errorf("notified error = %q, want %q", msg, PendingTimeoutError)
-			}
-		case <-time.After(3 * time.Second):
-			t.Fatal("job failed notification not sent")
+	select {
+	case msg := <-notifier.failed:
+		if msg != PendingTimeoutError {
+			t.Errorf("notified error = %q, want %q", msg, PendingTimeoutError)
 		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("job failed notification not sent")
+	}
+	select {
+	case msg := <-notifier.failed:
+		t.Errorf("second job failed notification %q sent, want none for the offline agent's job", msg)
+	case <-time.After(500 * time.Millisecond):
 	}
 }
 
