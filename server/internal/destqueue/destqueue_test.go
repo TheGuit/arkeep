@@ -257,6 +257,65 @@ func TestDrain_DispatchFailureRequeues(t *testing.T) {
 	}
 }
 
+// A waiting job past the timeout is failed as kept back by its destination when
+// its agent is connected, and notified; as never started by its agent when the
+// agent is offline, and not notified (issue #345).
+func TestDrain_WaitingTimeout(t *testing.T) {
+	tests := []struct {
+		name      string
+		connected bool
+		wantError string
+		notified  bool
+	}{
+		{"agent connected", true, TimeoutError, true},
+		{"agent offline", false, PendingTimeoutError, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			agent := e.agent("a")
+			d := e.dest("d")
+			ctx := context.Background()
+
+			e.runningJob(agent, "retention", d)
+			job := e.waitingJob(agent, d)
+			if err := e.gdb.Model(&db.Job{}).Where("id = ?", job.ID).UpdateColumn("updated_at", time.Now().UTC().Add(-25*time.Hour)).Error; err != nil {
+				t.Fatalf("backdate job: %v", err)
+			}
+
+			notifier := &failedNotifier{failed: make(chan string, 1)}
+			q := e.queue(agentSet{agent.ID.String(): tt.connected}, &fakeStarter{t: t, jobs: e.jobs, dests: e.dests})
+			q.SetNotificationService(notifier)
+			q.Drain(ctx)
+
+			got, err := e.jobs.GetByID(ctx, job.ID)
+			if err != nil {
+				t.Fatalf("GetByID: %v", err)
+			}
+			if got.Status != "failed" || got.Error != tt.wantError {
+				t.Errorf("job = %s %q, want failed %q", got.Status, got.Error, tt.wantError)
+			}
+
+			wait := 500 * time.Millisecond
+			if tt.notified {
+				wait = 3 * time.Second
+			}
+			select {
+			case msg := <-notifier.failed:
+				if !tt.notified {
+					t.Errorf("job failed notification %q sent, want none", msg)
+				} else if msg != tt.wantError {
+					t.Errorf("notified error = %q, want %q", msg, tt.wantError)
+				}
+			case <-time.After(wait):
+				if tt.notified {
+					t.Fatal("job failed notification not sent")
+				}
+			}
+		})
+	}
+}
+
 // A timeout of 0 disables it: a job may wait indefinitely.
 func TestDrain_TimeoutDisabled(t *testing.T) {
 	e := newEnv(t)

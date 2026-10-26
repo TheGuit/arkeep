@@ -240,8 +240,17 @@ func (d *Dispatcher) Drain(ctx context.Context) {
 	for i := range waiting {
 		job := &waiting[i]
 
+		connected := d.agents.IsConnected(job.AgentID.String())
+
 		if timeout > 0 && now.Sub(job.UpdatedAt) >= timeout {
-			d.failTimedOut(ctx, job, TimeoutError, true)
+			// A job of an offline agent was held back by the agent, not by its
+			// destinations: it is failed as never started, and not notified,
+			// like a stale pending job (issue #345).
+			if connected {
+				d.failTimedOut(ctx, job, TimeoutError, true)
+			} else {
+				d.failTimedOut(ctx, job, PendingTimeoutError, false)
+			}
 			continue
 		}
 
@@ -249,7 +258,7 @@ func (d *Dispatcher) Drain(ctx context.Context) {
 		// destinations either: holding up everyone else for an agent that may
 		// stay away for days would defeat the queue. It is started once the
 		// agent reconnects (the gRPC server notifies the queue then).
-		if !d.agents.IsConnected(job.AgentID.String()) {
+		if !connected {
 			continue
 		}
 
