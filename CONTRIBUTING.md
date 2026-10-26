@@ -62,7 +62,7 @@ task build:server   # builds GUI first, then compiles Go with GUI embedded
 - Sentinel errors are defined per package (`var ErrNotFound = errors.New(...)`).
 - Use `uuid.NewV7()` (time-ordered) for all new ID generation — never `uuid.New()`.
 - **Do not use `gorm.Preload`** — all relations are loaded with explicit queries in the repository layer.
-- **Do not add GORM soft delete** to new models — only `agents` and `policies` use it.
+- **Do not add GORM soft delete** to new models — only `agents`, `policies` and `destinations` use it.
 - The `EncryptedString` type is cast with `db.EncryptedString(value)`, not `.String()`.
 - Table-driven tests with the standard `testing` package — no external test frameworks.
 - Run `task lint` before submitting. All `golangci-lint` checks must pass.
