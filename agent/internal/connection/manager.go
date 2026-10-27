@@ -66,8 +66,9 @@ const (
 )
 
 // ErrEnrollmentNotSupported is returned by Enroll when the server responds with
-// 405 Method Not Allowed, indicating that mTLS auto-enrollment is disabled
-// server-side (e.g. ARKEEP_GRPC_INSECURE=true on the server).
+// 405 Method Not Allowed, indicating that the server runs without auto-PKI: it
+// serves gRPC with its own certificate (--grpc-tls-cert) or without TLS
+// (--grpc-insecure), and has no client certificates to issue.
 var ErrEnrollmentNotSupported = errors.New("enrollment not supported by server")
 
 // agentState is persisted to disk after the first successful registration.
@@ -308,11 +309,13 @@ func (m *Manager) Run(ctx context.Context) {
 		)
 		if err := m.Enroll(ctx); err != nil {
 			if errors.Is(err, ErrEnrollmentNotSupported) {
-				// 405 means the server has mTLS enrollment disabled (e.g.
-				// ARKEEP_GRPC_INSECURE=true server-side). This is expected when
-				// TLS is terminated by a reverse proxy — not a configuration error.
-				m.logger.Info("server does not support mTLS enrollment — connecting without client certificate",
-					zap.String("hint", "set ARKEEP_GRPC_INSECURE=true on the agent to suppress this message"),
+				// 405 means the server runs without auto-PKI (issue #344): it
+				// has its own certificate or TLS disabled. Not a configuration
+				// error, and the agent cannot tell the two apart, so the hint
+				// must not push it to insecure, which would drop TLS against a
+				// server that serves it.
+				m.logger.Info("server does not use auto-PKI — connecting without client certificate",
+					zap.String("hint", "expected when the server uses its own TLS certificate or has TLS disabled; the agent authenticates with --agent-secret. Set ARKEEP_GRPC_INSECURE=true only if the server runs with --grpc-insecure"),
 				)
 			} else {
 				m.logger.Error("enrollment failed — check --server-http-addr and --agent-secret",
