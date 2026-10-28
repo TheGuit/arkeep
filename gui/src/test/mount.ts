@@ -9,7 +9,7 @@ import { vi } from 'vitest'
 // navigation to named routes without declaring the app's route table.
 export async function mountPage(
   component: Component,
-  options: { path?: string; props?: Record<string, unknown> } = {},
+  options: { path?: string; props?: Record<string, unknown>; attachTo?: HTMLElement } = {},
 ): Promise<{ wrapper: VueWrapper; router: Router }> {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -21,6 +21,7 @@ export async function mountPage(
 
   const wrapper = mount(component, {
     props: options.props,
+    attachTo: options.attachTo,
     global: { plugins: [router, createPinia()] },
   })
   await flushPromises()

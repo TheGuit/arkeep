@@ -5,7 +5,7 @@
 // sign-in that came back with ?challenge=…) and completes the login with a
 // TOTP code or a recovery code. Emits `verified` once the tokens are issued
 // and `back` when the user returns to the credentials step.
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, useTemplateRef } from 'vue'
 import { useForm, useField } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
 import { z } from 'zod'
@@ -61,13 +61,23 @@ const { handleSubmit, isSubmitting, setFieldError } = useForm({
 })
 
 const { value: useRecoveryCode } = useField<boolean>('useRecoveryCode')
-const { value: pinValue, errorMessage: pinError } = useField<string[]>('pin')
+// The code is checked on submit only: per digit it would flag every partial
+// code, and clearing a rejected code would flag it as empty.
+const { value: pinValue, errorMessage: pinError } = useField<string[]>('pin', undefined, {
+    validateOnValueUpdate: false,
+})
 const { value: recoveryCodeValue, errorMessage: recoveryCodeError } = useField<string>('recoveryCode')
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
 const auth = useAuthStore()
 const serverError = ref<string | null>(null)
+const formEl = useTemplateRef<HTMLFormElement>('form')
+
+// verifying covers the request and, once it succeeds, the navigation the
+// parent starts on `verified`: the form stays busy until it is unmounted
+// instead of looking idle while the next page loads.
+const verifying = ref(false)
 
 const description = computed(() => useRecoveryCode.value
     ? 'Enter one of your recovery codes'
@@ -77,14 +87,22 @@ const description = computed(() => useRecoveryCode.value
 
 const onSubmit = handleSubmit(async (values) => {
     serverError.value = null
+    verifying.value = true
     const code = values.useRecoveryCode ? values.recoveryCode.trim() : values.pin.join('')
     try {
         await auth.completeTwoFactor(props.challengeToken, code)
         emit('verified')
     } catch {
-        serverError.value = values.useRecoveryCode
-            ? 'Invalid or already-used recovery code'
-            : 'Invalid or expired code'
+        verifying.value = false
+        if (values.useRecoveryCode) {
+            serverError.value = 'Invalid or already-used recovery code'
+            return
+        }
+        serverError.value = 'Invalid or expired code'
+        // Clear the rejected code and put the cursor back on the first digit.
+        pinValue.value = []
+        await nextTick()
+        formEl.value?.querySelector<HTMLInputElement>('[data-slot="pin-input-slot"]')?.focus()
     }
 })
 
@@ -97,7 +115,7 @@ function toggleMethod(): void {
 </script>
 
 <template>
-    <form class="p-6 md:p-8" novalidate @submit="onSubmit">
+    <form ref="form" class="p-6 md:p-8" novalidate @submit="onSubmit">
         <FieldGroup>
             <!-- Title -->
             <div class="flex flex-col items-center gap-2 text-center">
@@ -118,7 +136,7 @@ function toggleMethod(): void {
 
             <!-- TOTP code -->
             <Field v-if="!useRecoveryCode">
-                <PinInput v-model="pinValue" otp class="w-full" @complete="onSubmit()">
+                <PinInput v-model="pinValue" otp class="w-full" :disabled="verifying" @complete="onSubmit()">
                     <PinInputGroup class="w-full justify-between">
                         <PinInputSlot v-for="i in 6" :key="i" :index="i - 1" />
                     </PinInputGroup>
@@ -131,29 +149,29 @@ function toggleMethod(): void {
                 <FieldLabel for="recovery-code">Recovery code</FieldLabel>
                 <Input id="recovery-code" v-model="recoveryCodeValue" type="text"
                     placeholder="XXXX-XXXX-XXXX-XXXX" autocomplete="one-time-code" autofocus
-                    spellcheck="false"
+                    spellcheck="false" :disabled="verifying"
                     :class="recoveryCodeError ? 'border-destructive focus-visible:ring-destructive/30' : ''" />
                 <FieldError v-if="recoveryCodeError">{{ recoveryCodeError }}</FieldError>
             </Field>
 
             <!-- Submit -->
             <Field>
-                <Button type="submit" class="w-full" :disabled="isSubmitting">
-                    <Loader2 v-if="isSubmitting" class="size-4 animate-spin" />
-                    {{ isSubmitting ? 'Verifying…' : 'Verify' }}
+                <Button type="submit" class="w-full" :disabled="isSubmitting || verifying">
+                    <Loader2 v-if="isSubmitting || verifying" class="size-4 animate-spin" />
+                    {{ isSubmitting || verifying ? 'Verifying…' : 'Verify' }}
                 </Button>
             </Field>
 
             <!-- Toggle between TOTP and recovery code -->
-            <button type="button"
-                class="text-sm text-muted-foreground hover:text-foreground hover:underline"
+            <button type="button" :disabled="verifying"
+                class="text-sm text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-50 hover:underline"
                 @click="toggleMethod">
                 {{ useRecoveryCode ? 'Use your authenticator app instead' : 'Use a recovery code instead' }}
             </button>
 
             <!-- Back to sign in -->
-            <button type="button"
-                class="inline-flex items-center justify-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+            <button type="button" :disabled="verifying"
+                class="inline-flex items-center justify-center gap-1 text-sm text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
                 @click="emit('back')">
                 <ArrowLeft class="size-4" />
                 Back to sign in

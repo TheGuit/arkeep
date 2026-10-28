@@ -6,7 +6,8 @@ import TwoFactorCodeForm from './TwoFactorCodeForm.vue'
 
 // mountForm mounts the form for challenge "c" with completeTwoFactor stubbed.
 async function mountForm(outcome: 'ok' | 'rejected' = 'ok') {
-  const { wrapper } = await mountPage(TwoFactorCodeForm, { props: { challengeToken: 'c' } })
+  // Attached to the document so focus can be asserted.
+  const { wrapper } = await mountPage(TwoFactorCodeForm, { props: { challengeToken: 'c' }, attachTo: document.body })
   const complete = vi.spyOn(useAuthStore(), 'completeTwoFactor')
   if (outcome === 'ok') complete.mockResolvedValue()
   else complete.mockRejectedValue(new Error('400'))
@@ -46,6 +47,10 @@ describe('TwoFactorCodeForm', () => {
 
     expect(complete).toHaveBeenCalledWith('c', '123456')
     expect(wrapper.emitted('verified')).toHaveLength(1)
+    // The form stays busy while the parent navigates away.
+    const submit = wrapper.find('button[type=submit]')
+    expect(submit.attributes('disabled')).toBeDefined()
+    expect(submit.text()).toBe('Verifying…')
   })
 
   it('asks for the recovery code when empty', async () => {
@@ -73,5 +78,11 @@ describe('TwoFactorCodeForm', () => {
 
     expect(wrapper.text()).toContain('Invalid or expired code')
     expect(wrapper.emitted('verified')).toBeUndefined()
+    expect(wrapper.find('[data-slot="field-error"]').exists()).toBe(false)
+    // The rejected code is cleared and the cursor is back on the first digit.
+    const slots = wrapper.findAll<HTMLInputElement>('[data-slot="pin-input-slot"]')
+    expect(slots.every((s) => s.element.value === '')).toBe(true)
+    expect(document.activeElement).toBe(slots[0]!.element)
+    expect(wrapper.find('button[type=submit]').attributes('disabled')).toBeUndefined()
   })
 })
