@@ -55,7 +55,7 @@ import { useField, useFieldArray, useForm } from 'vee-validate'
 import { computed, ref, watch } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
 import * as z from 'zod'
-import { integerInRange, MAX_HOOK_TIMEOUT_SECS, MIN_REPO_PASSWORD_LENGTH } from '@/lib/validation'
+import { integerInRange, isHttpURL, MAX_HOOK_TIMEOUT_SECS, MIN_REPO_PASSWORD_LENGTH } from '@/lib/validation'
 
 const authStore = useAuthStore()
 
@@ -251,16 +251,6 @@ const hookFieldSchema = z.object({
   }
 })
 
-// isPingURL mirrors the server's healthcheck.ValidateURL: absolute http(s) URL.
-function isPingURL(v: string): boolean {
-  try {
-    const u = new URL(v)
-    return (u.protocol === 'http:' || u.protocol === 'https:') && u.host !== ''
-  } catch {
-    return false
-  }
-}
-
 const schema = z.object({
   name: z.string().min(1, 'Name is required'),
   agent_id: z.string().min(1, 'Agent is required'),
@@ -287,7 +277,7 @@ const schema = z.object({
   resume_interrupted: z.boolean(),
   notify_on_success: z.enum(['inherit', 'always', 'never']),
   notify_on_failure: z.enum(['inherit', 'always', 'never']),
-  healthcheck_url: z.string().trim().refine(v => v === '' || isPingURL(v), 'Must be an http(s) URL'),
+  healthcheck_url: z.string().trim().refine(v => v === '' || isHttpURL(v), 'Must be an http(s) URL'),
 }).superRefine((data, ctx) => {
   // A docker-volume row keeps its ticked volumes outside the form values
   // (selectedVolumes); a name typed in the manual fallback input is its path.

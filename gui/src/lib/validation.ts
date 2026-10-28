@@ -14,6 +14,17 @@ export const MIN_REPO_PASSWORD_LENGTH = 8
 // the agent's default hook timeout.
 export const MAX_HOOK_TIMEOUT_SECS = 24 * 60 * 60
 
+// isHttpURL mirrors the server's checks on webhook and healthcheck URLs: an
+// absolute http(s) URL with a host.
+export function isHttpURL(v: string): boolean {
+  try {
+    const u = new URL(v)
+    return (u.protocol === 'http:' || u.protocol === 'https:') && u.host !== ''
+  } catch {
+    return false
+  }
+}
+
 // passwordSchema is the rule for every new local account password.
 export const passwordSchema = z
   .string()

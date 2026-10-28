@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { integerInRange, MIN_PASSWORD_LENGTH, passwordSchema } from './validation'
+import { integerInRange, isHttpURL, MIN_PASSWORD_LENGTH, passwordSchema } from './validation'
 
 // firstMessage returns the first validation error of a failed parse, or
 // undefined when the value is valid.
@@ -36,5 +36,17 @@ describe('integerInRange', () => {
 
   it('returns the value as a number', () => {
     expect(schema.parse('24')).toBe(24)
+  })
+})
+
+describe('isHttpURL', () => {
+  it.each([
+    ['https://hooks.example.com/arkeep', true],
+    ['http://10.0.0.1:8080/hook', true],
+    ['ftp://example.com', false],
+    ['hooks.example.com', false],
+    ['', false],
+  ])('%s', (value, want) => {
+    expect(isHttpURL(value)).toBe(want)
   })
 })
