@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
@@ -499,6 +500,10 @@ func (h *PolicyHandler) Update(w http.ResponseWriter, r *http.Request) {
 		policy.Sources = *req.Sources
 	}
 	if req.RepoPassword != nil {
+		if err := validateRepoPassword(*req.RepoPassword); err != nil {
+			ErrBadRequest(w, err.Error())
+			return
+		}
 		policy.RepoPassword = db.EncryptedString(*req.RepoPassword)
 	}
 	if req.HookPreBackup != nil {
@@ -709,6 +714,20 @@ func (h *PolicyHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 
 // validateCreatePolicy checks required fields for policy creation and fills
 // in the defaults of optional fields.
+// minRepoPasswordLen is the minimum length, in characters, of a repository
+// password typed for a policy. The GUI enforces the same value. A password
+// resolved from a destination belongs to an existing repository and is not
+// checked: it cannot be changed from here.
+const minRepoPasswordLen = 8
+
+// validateRepoPassword checks a repository password set on a policy.
+func validateRepoPassword(password string) error {
+	if utf8.RuneCountInString(password) < minRepoPasswordLen {
+		return fmt.Errorf("repo_password must be at least %d characters", minRepoPasswordLen)
+	}
+	return nil
+}
+
 func validateCreatePolicy(req *createPolicyRequest) error {
 	if req.Name == "" {
 		return errors.New("name is required")
@@ -725,8 +744,13 @@ func validateCreatePolicy(req *createPolicyRequest) error {
 	if err := validateSourcesJSON(req.Sources); err != nil {
 		return errors.New("sources: " + err.Error())
 	}
-	if req.RepoPassword == "" && !req.UseDestinationPassword {
-		return errors.New("repo_password is required")
+	if !req.UseDestinationPassword {
+		if req.RepoPassword == "" {
+			return errors.New("repo_password is required")
+		}
+		if err := validateRepoPassword(req.RepoPassword); err != nil {
+			return err
+		}
 	}
 	if len(req.Destinations) == 0 && req.UseDestinationPassword {
 		return errors.New("use_destination_password requires at least one destination")
