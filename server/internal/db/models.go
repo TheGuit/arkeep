@@ -124,6 +124,15 @@ type OIDCProvider struct {
 	ClientSecret EncryptedString `gorm:"type:text;not null"`
 	Scopes       string          `gorm:"not null;default:'openid email profile'"` // space-separated
 	Enabled      bool            `gorm:"not null;default:false"`
+	// GroupsClaim names the ID token / UserInfo claim holding the user's
+	// groups. Required when AllowedGroups or AdminGroups is set.
+	GroupsClaim string `gorm:"not null;default:''"`
+	// AllowedGroups restricts sign-in to members of at least one of these
+	// groups; empty allows every user of the IdP.
+	AllowedGroups string `gorm:"not null;default:''"` // comma-separated
+	// AdminGroups grants the admin role to their members and the user role to
+	// everyone else, re-evaluated on every login; empty leaves roles alone.
+	AdminGroups string `gorm:"not null;default:''"` // comma-separated
 }
 
 // TableName overrides GORM's default naming convention, which would produce
