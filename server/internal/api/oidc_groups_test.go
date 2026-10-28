@@ -43,13 +43,14 @@ func refreshCookie(t *testing.T, resp *http.Response) string {
 // TestOIDCLogin_Groups covers the provider's allowed and admin groups (issue
 // #277): denial before provisioning, the reason shown on the callback page,
 // revocation of the denied account's sessions, and role mapping without ever
-// demoting the last active admin.
+// demoting the last active admin. The subtests share one server and IdP,
+// each with its own provider and users, since a test server is slow to start.
 func TestOIDCLogin_Groups(t *testing.T) {
 	ctx := context.Background()
+	e := newTestEnv(t)
+	idp := newFakeIdP(t, "arkeep")
 
 	t.Run("member of an allowed group signs in", func(t *testing.T) {
-		e := newTestEnv(t)
-		idp := newFakeIdP(t, "arkeep")
 		p := newGroupsProvider(t, e, idp, "arkeep-users", "")
 		idp.sub, idp.groups = "alice", []string{"other", "arkeep-users"}
 
@@ -68,8 +69,6 @@ func TestOIDCLogin_Groups(t *testing.T) {
 	}
 	for _, tt := range denied {
 		t.Run(tt.name, func(t *testing.T) {
-			e := newTestEnv(t)
-			idp := newFakeIdP(t, "arkeep")
 			p := newGroupsProvider(t, e, idp, "arkeep-users", "")
 			idp.sub, idp.groups = "mallory", tt.groups
 
@@ -85,8 +84,6 @@ func TestOIDCLogin_Groups(t *testing.T) {
 	}
 
 	t.Run("denial revokes the sessions of the linked account", func(t *testing.T) {
-		e := newTestEnv(t)
-		idp := newFakeIdP(t, "arkeep")
 		p := newGroupsProvider(t, e, idp, "arkeep-users", "")
 		idp.sub, idp.groups = "bob", []string{"arkeep-users"}
 		raw := refreshCookie(t, oidcCallback(t, e, p.ID))
@@ -100,9 +97,7 @@ func TestOIDCLogin_Groups(t *testing.T) {
 	})
 
 	t.Run("admin groups grant and remove the admin role", func(t *testing.T) {
-		e := newTestEnv(t)
 		createDBUser(t, e.deps, "local-admin@test.local", "admin")
-		idp := newFakeIdP(t, "arkeep")
 		p := newGroupsProvider(t, e, idp, "arkeep-users", "arkeep-admins")
 		idp.sub, idp.groups = "carol", []string{"arkeep-admins"}
 
@@ -125,9 +120,10 @@ func TestOIDCLogin_Groups(t *testing.T) {
 		}
 	})
 
+	// Counting admins needs a database where dave is the only one, so this
+	// subtest gets its own server.
 	t.Run("the last active admin is not demoted", func(t *testing.T) {
 		e := newTestEnv(t)
-		idp := newFakeIdP(t, "arkeep")
 		p := newGroupsProvider(t, e, idp, "", "arkeep-admins")
 		idp.sub, idp.groups = "dave", []string{"arkeep-admins"}
 		oidcCallback(t, e, p.ID)

@@ -632,7 +632,9 @@ func TestSettingsHandler_JobQueue(t *testing.T) {
 // session cap of an OIDC provider (issue #277): normalisation of the group
 // lists, the groups claim required by any group, the session cap bounds and
 // its default, and an update that omits the cap keeping the stored one.
+// The subtests share one server, since a test server is slow to start.
 func TestSettingsHandler_OIDCAccessFields(t *testing.T) {
+	e := newTestEnv(t)
 	base := func(extra map[string]any) map[string]any {
 		body := map[string]any{
 			"name":          "IdP",
@@ -654,7 +656,6 @@ func TestSettingsHandler_OIDCAccessFields(t *testing.T) {
 	}
 
 	t.Run("create normalises the fields and defaults the session cap", func(t *testing.T) {
-		e := newTestEnv(t)
 		resp := e.post(t, "/api/v1/settings/oidc", e.adminToken(t), base(map[string]any{
 			"groups_claim":   " groups ",
 			"allowed_groups": " arkeep-users ,, Arkeep Ops ",
@@ -680,20 +681,17 @@ func TestSettingsHandler_OIDCAccessFields(t *testing.T) {
 	}
 	for _, tt := range invalid {
 		t.Run("create rejects "+tt.name, func(t *testing.T) {
-			e := newTestEnv(t)
 			resp := e.post(t, "/api/v1/settings/oidc", e.adminToken(t), base(tt.extra))
 			assertStatus(t, resp, http.StatusBadRequest)
 		})
 	}
 
 	t.Run("blank group entries need no groups claim", func(t *testing.T) {
-		e := newTestEnv(t)
 		resp := e.post(t, "/api/v1/settings/oidc", e.adminToken(t), base(map[string]any{"allowed_groups": " , "}))
 		assertStatus(t, resp, http.StatusCreated)
 	})
 
 	t.Run("update sets the fields and an omitted cap keeps the stored one", func(t *testing.T) {
-		e := newTestEnv(t)
 		createResp := e.post(t, "/api/v1/settings/oidc", e.adminToken(t), base(map[string]any{"session_max_hours": 8}))
 		assertStatus(t, createResp, http.StatusCreated)
 		var created accessData
