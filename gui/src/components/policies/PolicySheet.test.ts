@@ -80,4 +80,40 @@ describe('PolicySheet', () => {
     })
     expect(JSON.parse(body!.sources as string)).toEqual([{ type: 'directory', path: '/var/lib/data', label: '' }])
   })
+
+  it('rejects a repository password shorter than the server minimum', async () => {
+    const wrapper = await openCreate()
+    await wrapper.find('#repo_password').setValue('1234567')
+    await wrapper.find('#repo_password_confirm').setValue('1234567')
+    await submitForm(wrapper)
+
+    expect(wrapper.text()).toContain('Repository password must be at least 8 characters')
+  })
+
+  describe('docker volume source', () => {
+    // asDockerVolume switches source row 0 to the docker-volume type, as the
+    // type selector does. The agent has no Docker, so only the manual name
+    // input is offered.
+    async function asDockerVolume(wrapper: Awaited<ReturnType<typeof openCreate>>) {
+      wrapper.findAllComponents({ name: 'Select' })[0]!.vm.$emit('update:modelValue', 'docker-volume')
+      await wrapper.vm.$nextTick()
+    }
+
+    it('requires a ticked volume or a typed name', async () => {
+      const wrapper = await openCreate()
+      await asDockerVolume(wrapper)
+      await submitForm(wrapper)
+
+      expect(wrapper.text()).toContain('Select at least one volume or enter its name')
+    })
+
+    it('accepts a volume name typed by hand', async () => {
+      const wrapper = await openCreate()
+      await asDockerVolume(wrapper)
+      await wrapper.find('#source-path-0').setValue('postgres_data')
+      await submitForm(wrapper)
+
+      expect(wrapper.text()).not.toContain('Select at least one volume or enter its name')
+    })
+  })
 })

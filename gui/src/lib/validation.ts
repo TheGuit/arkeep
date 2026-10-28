@@ -6,6 +6,10 @@ import { z } from 'zod'
 // MIN_PASSWORD_LENGTH mirrors auth.MinPasswordLen on the server.
 export const MIN_PASSWORD_LENGTH = 8
 
+// MIN_REPO_PASSWORD_LENGTH mirrors minRepoPasswordLen in the server's policy
+// handler: the repository password typed for a policy.
+export const MIN_REPO_PASSWORD_LENGTH = 8
+
 // passwordSchema is the rule for every new local account password.
 export const passwordSchema = z
   .string()

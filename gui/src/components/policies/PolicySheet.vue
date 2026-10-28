@@ -55,6 +55,7 @@ import { useField, useFieldArray, useForm } from 'vee-validate'
 import { computed, ref, watch } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
 import * as z from 'zod'
+import { MIN_REPO_PASSWORD_LENGTH } from '@/lib/validation'
 
 const authStore = useAuthStore()
 
@@ -278,14 +279,23 @@ const schema = z.object({
   notify_on_failure: z.enum(['inherit', 'always', 'never']),
   healthcheck_url: z.string().trim().refine(v => v === '' || isPingURL(v), 'Must be an http(s) URL'),
 }).superRefine((data, ctx) => {
+  // A docker-volume row keeps its ticked volumes outside the form values
+  // (selectedVolumes); a name typed in the manual fallback input is its path.
+  data.sources.forEach((s, idx) => {
+    if (s.type !== 'docker-volume') return
+    const ticked = selectedVolumes.value[String(idx)]?.size ?? 0
+    if (ticked === 0 && !s.path.trim()) {
+      ctx.addIssue({ code: 'custom', path: ['sources', idx, 'path'], message: 'Select at least one volume or enter its name' })
+    }
+  })
   if (!isEdit.value) {
     if (data.use_destination_password) {
       // Password resolved server-side from the selected destination(s).
-    } else if (!data.repo_password || data.repo_password.length < 8) {
+    } else if (!data.repo_password || data.repo_password.length < MIN_REPO_PASSWORD_LENGTH) {
       ctx.addIssue({
         code: "custom",
         path: ['repo_password'],
-        message: 'Repository password must be at least 8 characters',
+        message: `Repository password must be at least ${MIN_REPO_PASSWORD_LENGTH} characters`,
       })
     }
     if (data.repo_password !== data.repo_password_confirm) {
@@ -296,11 +306,11 @@ const schema = z.object({
       })
     }
   } else if (data.repo_password && data.repo_password.length > 0) {
-    if (data.repo_password.length < 8) {
+    if (data.repo_password.length < MIN_REPO_PASSWORD_LENGTH) {
       ctx.addIssue({
         code: "custom",
         path: ['repo_password'],
-        message: 'Repository password must be at least 8 characters',
+        message: `Repository password must be at least ${MIN_REPO_PASSWORD_LENGTH} characters`,
       })
     }
     if (data.repo_password !== data.repo_password_confirm) {
@@ -808,18 +818,6 @@ function serialiseHook(hook: z.infer<typeof hookFieldSchema>): string {
 }
 
 const onSubmit = handleSubmit(async (values) => {
-  // Validate that every docker-volume source has at least one volume selected.
-  for (let idx = 0; idx < values.sources.length; idx++) {
-    const s = values.sources[idx]
-    if (s?.type === 'docker-volume') {
-      const sel = selectedVolumes.value[String(idx)]
-      if (!sel || sel.size === 0) {
-        submitError.value = `Source ${idx + 1}: select at least one Docker volume.`
-        return
-      }
-    }
-  }
-
   if (!isEdit.value && !values.use_destination_password) {
     const hasWrongPassword = Object.values(repoCheckByDest.value).some(c => c.status === 'wrong_password')
     if (hasWrongPassword) {
