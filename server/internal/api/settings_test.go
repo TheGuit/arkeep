@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 
 	"github.com/arkeep-io/arkeep/server/internal/notification"
+	"github.com/arkeep-io/arkeep/server/internal/repositories"
 )
 
 func TestSettingsHandler_ListOIDC(t *testing.T) {
@@ -711,5 +713,20 @@ func TestSettingsHandler_OIDCAccessFields(t *testing.T) {
 		update["session_max_hours"] = 200
 		resp = e.doJSON(t, "PUT", "/api/v1/settings/oidc/"+created.ID, e.adminToken(t), update)
 		assertStatus(t, resp, http.StatusBadRequest)
+
+		// The audit entry records who can sign in and for how long.
+		entries, _, err := e.deps.audit.List(context.Background(),
+			repositories.AuditFilter{Action: "settings.oidc.update"}, repositories.ListOptions{Limit: 10})
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("audit List = %d entries, %v; want 1", len(entries), err)
+		}
+		var details map[string]any
+		if err := json.Unmarshal([]byte(entries[0].Details), &details); err != nil {
+			t.Fatalf("audit details: %v", err)
+		}
+		if details["groups_claim"] != "roles" || details["admin_groups"] != "admins" ||
+			details["allowed_groups"] != "" || details["session_max_hours"] != float64(8) {
+			t.Errorf("audit details = %v, want the group settings and session cap", details)
+		}
 	})
 }

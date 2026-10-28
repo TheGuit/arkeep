@@ -137,6 +137,20 @@ func (f *oidcAccessFields) normalize() string {
 	return ""
 }
 
+// oidcAuditDetails returns the provider settings recorded in the audit log.
+// The group restrictions and session cap decide who can sign in and as what,
+// so they are recorded alongside the name and issuer.
+func oidcAuditDetails(p *db.OIDCProvider) map[string]any {
+	return map[string]any{
+		"name":              p.Name,
+		"issuer":            p.Issuer,
+		"groups_claim":      p.GroupsClaim,
+		"allowed_groups":    p.AllowedGroups,
+		"admin_groups":      p.AdminGroups,
+		"session_max_hours": p.SessionMaxHours,
+	}
+}
+
 // ListOIDC handles GET /api/v1/settings/oidc (admin only).
 // Returns all configured OIDC providers.
 func (h *SettingsHandler) ListOIDC(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +237,7 @@ func (h *SettingsHandler) CreateOIDC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logAudit(r, h.auditRepo, h.logger, "settings.oidc.create", "settings", provider.ID.String(), map[string]any{"name": provider.Name, "issuer": provider.Issuer})
+	logAudit(r, h.auditRepo, h.logger, "settings.oidc.create", "settings", provider.ID.String(), oidcAuditDetails(provider))
 	Created(w, h.oidcToResponse(provider, requestCallbackURL(r)))
 }
 
@@ -328,7 +342,7 @@ func (h *SettingsHandler) UpdateOIDC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logAudit(r, h.auditRepo, h.logger, "settings.oidc.update", "settings", id.String(), map[string]any{"name": existing.Name, "issuer": existing.Issuer})
+	logAudit(r, h.auditRepo, h.logger, "settings.oidc.update", "settings", id.String(), oidcAuditDetails(existing))
 	Ok(w, h.oidcToResponse(existing, requestCallbackURL(r)))
 }
 
