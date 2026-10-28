@@ -1,0 +1,44 @@
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { createPinia } from 'pinia'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
+import type { Component } from 'vue'
+import { vi } from 'vitest'
+
+// mountPage mounts a page or component with a fresh Pinia store and an
+// in-memory router at path. router.push is stubbed, so tests can assert
+// navigation to named routes without declaring the app's route table.
+export async function mountPage(
+  component: Component,
+  options: { path?: string; props?: Record<string, unknown> } = {},
+): Promise<{ wrapper: VueWrapper; router: Router }> {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: '/:pathMatch(.*)*', component: { render: () => null } }],
+  })
+  await router.push(options.path ?? '/')
+  await router.isReady()
+  vi.spyOn(router, 'push').mockResolvedValue(undefined)
+
+  const wrapper = mount(component, {
+    props: options.props,
+    global: { plugins: [router, createPinia()] },
+  })
+  await flushPromises()
+  return { wrapper, router }
+}
+
+// settle waits for vee-validate, whose validation and submit handlers chain
+// promises across several macrotasks, and for the resulting re-render.
+export async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await flushPromises()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+}
+
+// submitForm submits the first form of wrapper (or the one matching
+// selector) and waits for the validation and submit handlers to settle.
+export async function submitForm(wrapper: VueWrapper, selector = 'form'): Promise<void> {
+  await wrapper.find(selector).trigger('submit')
+  await settle()
+}
