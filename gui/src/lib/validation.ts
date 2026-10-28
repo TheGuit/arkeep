@@ -10,6 +10,10 @@ export const MIN_PASSWORD_LENGTH = 8
 // handler: the repository password typed for a policy.
 export const MIN_REPO_PASSWORD_LENGTH = 8
 
+// MAX_HOOK_TIMEOUT_SECS mirrors maxHookTimeoutSecs on the server. 0 means
+// the agent's default hook timeout.
+export const MAX_HOOK_TIMEOUT_SECS = 24 * 60 * 60
+
 // passwordSchema is the rule for every new local account password.
 export const passwordSchema = z
   .string()

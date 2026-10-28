@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mountPage, submitForm } from '@/test/mount'
 import { api } from '@/services/api'
+import { useAuthStore } from '@/stores/auth'
+import type { User } from '@/types'
 import PolicySheet from './PolicySheet.vue'
 
 vi.mock('@/services/api', async (importActual) => ({
@@ -114,6 +116,43 @@ describe('PolicySheet', () => {
       await submitForm(wrapper)
 
       expect(wrapper.text()).not.toContain('Select at least one volume or enter its name')
+    })
+  })
+
+  describe('hook timeout', () => {
+    // enablePreHook opens the hooks section and switches the pre-backup hook
+    // on, as an admin does.
+    async function enablePreHook(wrapper: Awaited<ReturnType<typeof openCreate>>) {
+      useAuthStore().user = { role: 'admin' } as User
+      await wrapper.findAll('button').find((b) => b.text().startsWith('Hooks'))!.trigger('click')
+      const preHook = wrapper.findAllComponents({ name: 'Switch' })
+        .find((s) => s.element.parentElement?.textContent?.includes('Pre-backup'))!
+      preHook.vm.$emit('update:modelValue', true)
+      await wrapper.vm.$nextTick()
+    }
+
+    it.each([
+      ['empty', '', 'A value is required'],
+      ['above 24 hours', '86401', 'Must be a whole number between 0 and 86400'],
+    ])('rejects an %s timeout', async (_, value, message) => {
+      const wrapper = await openCreate()
+      await enablePreHook(wrapper)
+      await wrapper.find('#hook-pre-timeout').setValue(value)
+      await submitForm(wrapper)
+
+      expect(wrapper.text()).toContain(message)
+    })
+
+    it('ignores the timeout of a disabled hook', async () => {
+      const wrapper = await openCreate()
+      await enablePreHook(wrapper)
+      await wrapper.find('#hook-pre-timeout').setValue('')
+      const preHook = wrapper.findAllComponents({ name: 'Switch' })
+        .find((s) => s.element.parentElement?.textContent?.includes('Pre-backup'))!
+      preHook.vm.$emit('update:modelValue', false)
+      await submitForm(wrapper)
+
+      expect(wrapper.text()).not.toContain('A value is required')
     })
   })
 })

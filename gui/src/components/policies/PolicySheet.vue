@@ -55,7 +55,7 @@ import { useField, useFieldArray, useForm } from 'vee-validate'
 import { computed, ref, watch } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
 import * as z from 'zod'
-import { MIN_REPO_PASSWORD_LENGTH } from '@/lib/validation'
+import { integerInRange, MAX_HOOK_TIMEOUT_SECS, MIN_REPO_PASSWORD_LENGTH } from '@/lib/validation'
 
 const authStore = useAuthStore()
 
@@ -233,12 +233,22 @@ const sourceItemSchema = z.object({
   }
 })
 
+const hookTimeoutSchema = integerInRange(0, MAX_HOOK_TIMEOUT_SECS)
+
+// The timeout is checked only on an enabled hook: a disabled one is hidden
+// and never sent.
 const hookFieldSchema = z.object({
   enabled: z.boolean(),
   name: z.string().optional(),
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
-  timeout_secs: z.coerce.number().int().min(0).optional(),
+  timeout_secs: z.union([z.number(), z.string()]).optional(),
+}).superRefine((hook, ctx) => {
+  if (!hook.enabled) return
+  const result = hookTimeoutSchema.safeParse(hook.timeout_secs)
+  if (!result.success) {
+    ctx.addIssue({ code: 'custom', path: ['timeout_secs'], message: result.error.issues[0]!.message })
+  }
 })
 
 // isPingURL mirrors the server's healthcheck.ValidateURL: absolute http(s) URL.
@@ -541,13 +551,13 @@ const { value: hookPreEnabled } = useField<boolean>('hook_pre.enabled')
 const { value: hookPreName } = useField<string>('hook_pre.name')
 const { value: hookPreCommand } = useField<string>('hook_pre.command')
 const { value: hookPreArgs } = useField<string[]>('hook_pre.args')
-const { value: hookPreTimeout } = useField<number>('hook_pre.timeout_secs')
+const { value: hookPreTimeout, errorMessage: hookPreTimeoutError } = useField<number | string>('hook_pre.timeout_secs')
 
 const { value: hookPostEnabled } = useField<boolean>('hook_post.enabled')
 const { value: hookPostName } = useField<string>('hook_post.name')
 const { value: hookPostCommand } = useField<string>('hook_post.command')
 const { value: hookPostArgs } = useField<string[]>('hook_post.args')
-const { value: hookPostTimeout } = useField<number>('hook_post.timeout_secs')
+const { value: hookPostTimeout, errorMessage: hookPostTimeoutError } = useField<number | string>('hook_post.timeout_secs')
 
 function addHookPreArg() { hookPreArgs.value = [...(hookPreArgs.value ?? []), ''] }
 function removeHookPreArg(idx: number) { hookPreArgs.value = (hookPreArgs.value ?? []).filter((_, i) => i !== idx) }
@@ -813,7 +823,7 @@ function serialiseHook(hook: z.infer<typeof hookFieldSchema>): string {
     name: hook.name ?? '',
     command: hook.command,
     args: hook.args ?? [],
-    timeout_secs: hook.timeout_secs ?? 30,
+    timeout_secs: Number(hook.timeout_secs ?? 30),
   })
 }
 
@@ -1354,7 +1364,11 @@ function onOpenChange(value: boolean) {
                       </div>
                       <div class="flex flex-col gap-1.5">
                         <Label for="hook-pre-timeout" class="text-sm">Timeout (sec)</Label>
-                        <Input id="hook-pre-timeout" v-model="hookPreTimeout" type="number" min="0" :disabled="!authStore.isAdmin" />
+                        <Input id="hook-pre-timeout" v-model="hookPreTimeout" type="number" min="0"
+                          :max="MAX_HOOK_TIMEOUT_SECS" :disabled="!authStore.isAdmin"
+                          :class="hookPreTimeoutError ? 'border-destructive focus-visible:ring-destructive/30' : ''" />
+                        <p class="text-xs text-muted-foreground">0 uses the agent default (5 minutes).</p>
+                        <FieldError v-if="hookPreTimeoutError">{{ hookPreTimeoutError }}</FieldError>
                       </div>
                     </div>
                     <div class="flex flex-col gap-1.5">
@@ -1405,7 +1419,11 @@ function onOpenChange(value: boolean) {
                       </div>
                       <div class="flex flex-col gap-1.5">
                         <Label for="hook-post-timeout" class="text-sm">Timeout (sec)</Label>
-                        <Input id="hook-post-timeout" v-model="hookPostTimeout" type="number" min="0" :disabled="!authStore.isAdmin" />
+                        <Input id="hook-post-timeout" v-model="hookPostTimeout" type="number" min="0"
+                          :max="MAX_HOOK_TIMEOUT_SECS" :disabled="!authStore.isAdmin"
+                          :class="hookPostTimeoutError ? 'border-destructive focus-visible:ring-destructive/30' : ''" />
+                        <p class="text-xs text-muted-foreground">0 uses the agent default (5 minutes).</p>
+                        <FieldError v-if="hookPostTimeoutError">{{ hookPostTimeoutError }}</FieldError>
                       </div>
                     </div>
                     <div class="flex flex-col gap-1.5">
