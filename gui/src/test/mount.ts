@@ -1,15 +1,28 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import type { Component } from 'vue'
+import { h, type Component } from 'vue'
 import { vi } from 'vitest'
+
+// InPlaceTeleport replaces <Teleport> and renders its content where it is
+// declared, inside the wrapper.
+const InPlaceTeleport = {
+  setup: (_: unknown, { slots }: { slots: { default?: () => unknown } }) => () => h('div', slots.default?.() as never),
+}
 
 // mountPage mounts a page or component with a fresh Pinia store and an
 // in-memory router at path. router.push is stubbed, so tests can assert
 // navigation to named routes without declaring the app's route table.
 export async function mountPage(
   component: Component,
-  options: { path?: string; props?: Record<string, unknown>; attachTo?: HTMLElement } = {},
+  options: {
+    path?: string
+    props?: Record<string, unknown>
+    attachTo?: HTMLElement
+    // stubs replaces child components by name, e.g. a combobox that loads
+    // its options from the API.
+    stubs?: Record<string, boolean>
+  } = {},
 ): Promise<{ wrapper: VueWrapper; router: Router }> {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -22,7 +35,9 @@ export async function mountPage(
   const wrapper = mount(component, {
     props: options.props,
     attachTo: options.attachTo,
-    global: { plugins: [router, createPinia()] },
+    // Sheets and dialogs teleport to <body>: render them in place so the
+    // wrapper can find their fields.
+    global: { plugins: [router, createPinia()], stubs: { teleport: InPlaceTeleport, ...options.stubs } },
   })
   await flushPromises()
   return { wrapper, router }
