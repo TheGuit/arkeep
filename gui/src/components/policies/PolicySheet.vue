@@ -319,9 +319,17 @@ type FormValues = z.infer<typeof schema>
 // Form setup
 // ---------------------------------------------------------------------------
 
-const { handleSubmit, resetForm, setValues } = useForm<FormValues>({
+const { handleSubmit, resetForm, setValues, errors } = useForm<FormValues>({
   validationSchema: toTypedSchema(schema),
+  initialValues: defaultValues(),
 })
+
+// sourceError returns the validation error of one field of source row idx.
+// Source rows are a field array, so their errors are read from the form's
+// error bag (keys like "sources[0].path") rather than from useField.
+function sourceError(idx: number, field: 'path' | 'label'): string | undefined {
+  return (errors.value as Record<string, string | undefined>)[`sources[${idx}].${field}`]
+}
 
 // General
 const { value: nameValue, errorMessage: nameError } = useField<string>('name')
@@ -970,6 +978,7 @@ function onOpenChange(value: boolean) {
             class="rounded-md border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
             No sources added. Click <strong>Add Source</strong> to begin.
           </div>
+          <FieldError v-if="errors.sources">{{ errors.sources }}</FieldError>
 
           <div v-for="(field, idx) in sourceFields" :key="field.key" class="flex flex-col gap-3 rounded-md border p-3">
             <div class="flex items-center justify-between">
@@ -1022,7 +1031,9 @@ function onOpenChange(value: boolean) {
               <Input :id="`source-label-${idx}`" :model-value="(field.value as any).label as string" class="w-full"
                 :disabled="!authStore.isAdmin && (field.value as any).type === 'command'"
                 :placeholder="(field.value as any).type === 'command' ? 'e.g. postgres-dump' : 'e.g. postgres-data'"
+                :class="sourceError(idx, 'label') ? 'border-destructive focus-visible:ring-destructive/30' : ''"
                 @update:model-value="(field.value as any).label = $event" />
+              <FieldError v-if="sourceError(idx, 'label')">{{ sourceError(idx, 'label') }}</FieldError>
             </div>
 
             <!-- Path / Volumes / Command — full width -->
@@ -1110,6 +1121,7 @@ function onOpenChange(value: boolean) {
                 <Input :id="`source-path-${idx}`" :model-value="(field.value as any).path as string"
                   class="font-mono w-full" placeholder="pg_dump -U postgres mydb | gzip"
                   :disabled="!authStore.isAdmin"
+                  :class="sourceError(idx, 'path') ? 'border-destructive focus-visible:ring-destructive/30' : ''"
                   @update:model-value="(field.value as any).path = $event" />
                 <p class="text-xs text-muted-foreground">
                   Runs on the agent; its output is streamed directly into the backup — no
@@ -1121,8 +1133,10 @@ function onOpenChange(value: boolean) {
               <template v-else>
                 <Input :id="`source-path-${idx}`" :model-value="(field.value as any).path as string"
                   class="font-mono w-full" placeholder="e.g. /var/lib/data"
+                  :class="sourceError(idx, 'path') ? 'border-destructive focus-visible:ring-destructive/30' : ''"
                   @update:model-value="(field.value as any).path = $event" />
               </template>
+              <FieldError v-if="sourceError(idx, 'path')">{{ sourceError(idx, 'path') }}</FieldError>
             </div>
           </div>
 
@@ -1223,7 +1237,7 @@ function onOpenChange(value: boolean) {
               </div>
             </div>
           </div>
-          <p v-if="orderedDestIdsError" class="text-sm text-destructive">{{ orderedDestIdsError }}</p>
+          <FieldError v-if="orderedDestIdsError">{{ orderedDestIdsError }}</FieldError>
 
           <Separator />
 
