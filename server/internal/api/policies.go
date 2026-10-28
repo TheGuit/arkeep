@@ -511,6 +511,10 @@ func (h *PolicyHandler) Update(w http.ResponseWriter, r *http.Request) {
 			ErrBadRequest(w, "hook_pre_backup: "+err.Error())
 			return
 		}
+		if err := validateHookTimeout(*req.HookPreBackup); err != nil {
+			ErrBadRequest(w, "hook_pre_backup: "+err.Error())
+			return
+		}
 		// Hook commands execute with agent privileges — only admins may change them.
 		if *req.HookPreBackup != policy.HookPreBackup && !isAdmin(r) {
 			ErrForbidden(w)
@@ -520,6 +524,10 @@ func (h *PolicyHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.HookPostBackup != nil {
 		if err := validateHookCommand(*req.HookPostBackup); err != nil {
+			ErrBadRequest(w, "hook_post_backup: "+err.Error())
+			return
+		}
+		if err := validateHookTimeout(*req.HookPostBackup); err != nil {
 			ErrBadRequest(w, "hook_post_backup: "+err.Error())
 			return
 		}
@@ -761,7 +769,13 @@ func validateCreatePolicy(req *createPolicyRequest) error {
 	if err := validateHookCommand(req.HookPreBackup); err != nil {
 		return errors.New("hook_pre_backup: " + err.Error())
 	}
+	if err := validateHookTimeout(req.HookPreBackup); err != nil {
+		return errors.New("hook_pre_backup: " + err.Error())
+	}
 	if err := validateHookCommand(req.HookPostBackup); err != nil {
+		return errors.New("hook_post_backup: " + err.Error())
+	}
+	if err := validateHookTimeout(req.HookPostBackup); err != nil {
 		return errors.New("hook_post_backup: " + err.Error())
 	}
 	req.NotifyOnSuccess = cmp.Or(req.NotifyOnSuccess, db.NotifyInherit)
