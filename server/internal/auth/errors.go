@@ -44,6 +44,11 @@ var (
 	// Wrapped errors carry the reason, which is safe to show to the user.
 	ErrOIDCLinkRefused = errors.New("auth: this account cannot be linked to the identity provider automatically")
 
+	// ErrOIDCGroupDenied is returned when the provider restricts sign-in to
+	// allowed groups and the user is in none of them, or the groups claim is
+	// missing. The message is safe to show to the user; details are logged.
+	ErrOIDCGroupDenied = errors.New("auth: your account is not a member of a group allowed to sign in")
+
 	// ErrTokenRevoked is returned when a syntactically valid access token has
 	// been explicitly revoked via the denylist (e.g. after logout).
 	ErrTokenRevoked = errors.New("auth: token has been revoked")
