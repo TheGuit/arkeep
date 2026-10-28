@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -63,6 +64,9 @@ var (
 // LastLoginAt is not stamped.
 type TwoFactorRequiredError struct {
 	UserID uuid.UUID
+	// SessionExpiresAt is the OIDC session deadline the challenge must carry
+	// to the tokens issued after the code; nil for a local login.
+	SessionExpiresAt *time.Time
 }
 
 func (e *TwoFactorRequiredError) Error() string {

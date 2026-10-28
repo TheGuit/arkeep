@@ -246,11 +246,15 @@ func (p *OIDCAuthProvider) ExchangeCode(ctx context.Context, req OIDCCallbackReq
 		return nil, ErrUserDisabled
 	}
 
+	// The session must pass through the IdP again after SessionMaxHours, so
+	// that the groups are re-checked.
+	sessionExpiresAt := time.Now().Add(time.Duration(cfg.SessionMaxHours) * time.Hour)
+
 	// The IdP proved the first factor only: an account with two-factor
 	// authentication still owes its second one (SEC-06). As for a local login,
 	// LastLoginAt is not stamped until the challenge is completed.
 	if user.TwoFactorEnabled {
-		return nil, &TwoFactorRequiredError{UserID: user.ID}
+		return nil, &TwoFactorRequiredError{UserID: user.ID, SessionExpiresAt: &sessionExpiresAt}
 	}
 
 	// Update LastLoginAt. Non-fatal: a failure here should not block the login.
@@ -263,7 +267,7 @@ func (p *OIDCAuthProvider) ExchangeCode(ctx context.Context, req OIDCCallbackReq
 		)
 	}
 
-	return p.issueTokenPair(ctx, user.ID, user.Email, user.Role)
+	return p.issueTokenPair(ctx, user.ID, user.Email, user.Role, &sessionExpiresAt)
 }
 
 // ListEnabledProviders returns all enabled OIDC provider configurations.
