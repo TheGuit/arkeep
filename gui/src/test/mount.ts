@@ -1,5 +1,5 @@
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import { createPinia } from 'pinia'
+import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
+import { createPinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { h, type Component } from 'vue'
 import { vi } from 'vitest'
@@ -22,6 +22,8 @@ export async function mountPage(
     // stubs replaces child components by name, e.g. a combobox that loads
     // its options from the API.
     stubs?: Record<string, boolean>
+    // pinia lets a test fill a store (e.g. the signed-in user) before mount.
+    pinia?: Pinia
   } = {},
 ): Promise<{ wrapper: VueWrapper; router: Router }> {
   const router = createRouter({
@@ -37,7 +39,7 @@ export async function mountPage(
     attachTo: options.attachTo,
     // Sheets and dialogs teleport to <body>: render them in place so the
     // wrapper can find their fields.
-    global: { plugins: [router, createPinia()], stubs: { teleport: InPlaceTeleport, ...options.stubs } },
+    global: { plugins: [router, options.pinia ?? createPinia()], stubs: { teleport: InPlaceTeleport, ...options.stubs } },
   })
   await flushPromises()
   return { wrapper, router }
@@ -52,9 +54,10 @@ export async function settle(): Promise<void> {
   }
 }
 
-// submitForm submits the first form of wrapper (or the one matching
-// selector) and waits for the validation and submit handlers to settle.
-export async function submitForm(wrapper: VueWrapper, selector = 'form'): Promise<void> {
-  await wrapper.find(selector).trigger('submit')
+// submitForm submits the first form of wrapper (or form, a selector or an
+// element found in it) and waits for the validation and submit handlers to
+// settle.
+export async function submitForm(wrapper: VueWrapper, form: string | DOMWrapper<Element> = 'form'): Promise<void> {
+  await (typeof form === 'string' ? wrapper.find(form) : form).trigger('submit')
   await settle()
 }
