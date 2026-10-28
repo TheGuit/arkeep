@@ -345,6 +345,8 @@ func (h *AuthHandler) OIDCCallback(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, auth.ErrOIDCLinkRefused):
 			reason = strings.TrimPrefix(err.Error(), "auth: ")
+		case errors.Is(err, auth.ErrOIDCGroupDenied):
+			reason = strings.TrimPrefix(auth.ErrOIDCGroupDenied.Error(), "auth: ")
 		case errors.Is(err, auth.ErrProviderNotFound):
 			reason = "this sign-in provider is not available"
 		}
