@@ -625,3 +625,91 @@ func TestSettingsHandler_JobQueue(t *testing.T) {
 		assertStatus(t, resp, http.StatusForbidden)
 	})
 }
+
+// TestSettingsHandler_OIDCAccessFields covers the group restrictions and
+// session cap of an OIDC provider (issue #277): normalisation of the group
+// lists, the groups claim required by any group, the session cap bounds and
+// its default, and an update that omits the cap keeping the stored one.
+func TestSettingsHandler_OIDCAccessFields(t *testing.T) {
+	base := func(extra map[string]any) map[string]any {
+		body := map[string]any{
+			"name":          "IdP",
+			"issuer":        "https://idp.example.com",
+			"client_id":     "cid",
+			"client_secret": "sec",
+		}
+		for k, v := range extra {
+			body[k] = v
+		}
+		return body
+	}
+	type accessData struct {
+		ID              string `json:"id"`
+		GroupsClaim     string `json:"groups_claim"`
+		AllowedGroups   string `json:"allowed_groups"`
+		AdminGroups     string `json:"admin_groups"`
+		SessionMaxHours int    `json:"session_max_hours"`
+	}
+
+	t.Run("create normalises the fields and defaults the session cap", func(t *testing.T) {
+		e := newTestEnv(t)
+		resp := e.post(t, "/api/v1/settings/oidc", e.adminToken(t), base(map[string]any{
+			"groups_claim":   " groups ",
+			"allowed_groups": " arkeep-users ,, Arkeep Ops ",
+			"admin_groups":   "arkeep-admins,",
+		}))
+		assertStatus(t, resp, http.StatusCreated)
+		var got accessData
+		decodeData(t, resp, &got)
+		want := accessData{ID: got.ID, GroupsClaim: "groups", AllowedGroups: "arkeep-users, Arkeep Ops", AdminGroups: "arkeep-admins", SessionMaxHours: 12}
+		if got != want {
+			t.Errorf("got %+v, want %+v", got, want)
+		}
+	})
+
+	invalid := []struct {
+		name  string
+		extra map[string]any
+	}{
+		{"allowed groups without groups claim", map[string]any{"allowed_groups": "arkeep-users"}},
+		{"admin groups without groups claim", map[string]any{"groups_claim": "  ", "admin_groups": "arkeep-admins"}},
+		{"session cap below 1", map[string]any{"session_max_hours": 0}},
+		{"session cap above the refresh token lifetime", map[string]any{"session_max_hours": 169}},
+	}
+	for _, tt := range invalid {
+		t.Run("create rejects "+tt.name, func(t *testing.T) {
+			e := newTestEnv(t)
+			resp := e.post(t, "/api/v1/settings/oidc", e.adminToken(t), base(tt.extra))
+			assertStatus(t, resp, http.StatusBadRequest)
+		})
+	}
+
+	t.Run("blank group entries need no groups claim", func(t *testing.T) {
+		e := newTestEnv(t)
+		resp := e.post(t, "/api/v1/settings/oidc", e.adminToken(t), base(map[string]any{"allowed_groups": " , "}))
+		assertStatus(t, resp, http.StatusCreated)
+	})
+
+	t.Run("update sets the fields and an omitted cap keeps the stored one", func(t *testing.T) {
+		e := newTestEnv(t)
+		createResp := e.post(t, "/api/v1/settings/oidc", e.adminToken(t), base(map[string]any{"session_max_hours": 8}))
+		assertStatus(t, createResp, http.StatusCreated)
+		var created accessData
+		decodeData(t, createResp, &created)
+
+		update := base(map[string]any{"groups_claim": "roles", "admin_groups": "admins"})
+		delete(update, "client_secret")
+		resp := e.doJSON(t, "PUT", "/api/v1/settings/oidc/"+created.ID, e.adminToken(t), update)
+		assertStatus(t, resp, http.StatusOK)
+		var got accessData
+		decodeData(t, resp, &got)
+		want := accessData{ID: created.ID, GroupsClaim: "roles", AdminGroups: "admins", SessionMaxHours: 8}
+		if got != want {
+			t.Errorf("got %+v, want %+v", got, want)
+		}
+
+		update["session_max_hours"] = 200
+		resp = e.doJSON(t, "PUT", "/api/v1/settings/oidc/"+created.ID, e.adminToken(t), update)
+		assertStatus(t, resp, http.StatusBadRequest)
+	})
+}

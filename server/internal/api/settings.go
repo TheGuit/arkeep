@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/arkeep-io/arkeep/server/internal/auth"
 	"github.com/arkeep-io/arkeep/server/internal/db"
 	"github.com/arkeep-io/arkeep/server/internal/destqueue"
 	"github.com/arkeep-io/arkeep/server/internal/logretention"
@@ -66,29 +67,74 @@ func NewSettingsHandler(
 // CallbackURL is computed server-side and returned read-only for the admin to
 // copy into the identity provider's application settings.
 type oidcProviderResponse struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Issuer      string `json:"issuer"`
-	ClientID    string `json:"client_id"`
-	CallbackURL string `json:"callback_url"` // read-only, computed from base_url
-	Scopes      string `json:"scopes"`
-	Enabled     bool   `json:"enabled"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Issuer          string `json:"issuer"`
+	ClientID        string `json:"client_id"`
+	CallbackURL     string `json:"callback_url"` // read-only, computed from base_url
+	Scopes          string `json:"scopes"`
+	Enabled         bool   `json:"enabled"`
+	GroupsClaim     string `json:"groups_claim"`
+	AllowedGroups   string `json:"allowed_groups"`
+	AdminGroups     string `json:"admin_groups"`
+	SessionMaxHours int    `json:"session_max_hours"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 func (h *SettingsHandler) oidcToResponse(p *db.OIDCProvider, callbackURL string) oidcProviderResponse {
 	return oidcProviderResponse{
-		ID:          p.ID.String(),
-		Name:        p.Name,
-		Issuer:      p.Issuer,
-		ClientID:    p.ClientID,
-		CallbackURL: callbackURL,
-		Scopes:      p.Scopes,
-		Enabled:     p.Enabled,
-		CreatedAt:   p.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:   p.UpdatedAt.UTC().Format(time.RFC3339),
+		ID:              p.ID.String(),
+		Name:            p.Name,
+		Issuer:          p.Issuer,
+		ClientID:        p.ClientID,
+		CallbackURL:     callbackURL,
+		Scopes:          p.Scopes,
+		Enabled:         p.Enabled,
+		GroupsClaim:     p.GroupsClaim,
+		AllowedGroups:   p.AllowedGroups,
+		AdminGroups:     p.AdminGroups,
+		SessionMaxHours: p.SessionMaxHours,
+		CreatedAt:       p.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:       p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
+}
+
+const (
+	// defaultOIDCSessionMaxHours is the session cap of a provider created
+	// without one, matching the column default.
+	defaultOIDCSessionMaxHours = 12
+	// maxOIDCSessionMaxHours is the refresh token lifetime: a longer cap
+	// would never be reached.
+	maxOIDCSessionMaxHours = 168
+)
+
+// oidcAccessFields are the group restrictions and session cap of an OIDC
+// provider, shared by the create and update requests.
+type oidcAccessFields struct {
+	GroupsClaim   string `json:"groups_claim"`
+	AllowedGroups string `json:"allowed_groups"` // comma-separated
+	AdminGroups   string `json:"admin_groups"`   // comma-separated
+	// SessionMaxHours is optional: omitted keeps the stored value on update
+	// and uses defaultOIDCSessionMaxHours on create.
+	SessionMaxHours *int `json:"session_max_hours"`
+}
+
+// normalize trims the claim name and rewrites the group lists as
+// comma-separated names without blank entries, then validates them. It
+// returns a message for the client when the fields are invalid.
+func (f *oidcAccessFields) normalize() string {
+	f.GroupsClaim = strings.TrimSpace(f.GroupsClaim)
+	f.AllowedGroups = strings.Join(auth.SplitGroups(f.AllowedGroups), ", ")
+	f.AdminGroups = strings.Join(auth.SplitGroups(f.AdminGroups), ", ")
+
+	if f.GroupsClaim == "" && (f.AllowedGroups != "" || f.AdminGroups != "") {
+		return "groups_claim is required when allowed_groups or admin_groups is set"
+	}
+	if f.SessionMaxHours != nil && (*f.SessionMaxHours < 1 || *f.SessionMaxHours > maxOIDCSessionMaxHours) {
+		return fmt.Sprintf("session_max_hours must be between 1 and %d", maxOIDCSessionMaxHours)
+	}
+	return ""
 }
 
 // ListOIDC handles GET /api/v1/settings/oidc (admin only).
@@ -119,6 +165,7 @@ type createOIDCRequest struct {
 	ClientSecret string `json:"client_secret"`
 	Scopes       string `json:"scopes"`
 	Enabled      bool   `json:"enabled"`
+	oidcAccessFields
 }
 
 // CreateOIDC handles POST /api/v1/settings/oidc (admin only).
@@ -144,18 +191,30 @@ func (h *SettingsHandler) CreateOIDC(w http.ResponseWriter, r *http.Request) {
 		ErrBadRequest(w, "client_secret is required")
 		return
 	}
+	if msg := req.normalize(); msg != "" {
+		ErrBadRequest(w, msg)
+		return
+	}
 
 	if req.Scopes == "" {
 		req.Scopes = "openid email profile"
 	}
+	sessionMaxHours := defaultOIDCSessionMaxHours
+	if req.SessionMaxHours != nil {
+		sessionMaxHours = *req.SessionMaxHours
+	}
 
 	provider := &db.OIDCProvider{
-		Name:         req.Name,
-		Issuer:       req.Issuer,
-		ClientID:     req.ClientID,
-		ClientSecret: db.EncryptedString(req.ClientSecret),
-		Scopes:       req.Scopes,
-		Enabled:      req.Enabled,
+		Name:            req.Name,
+		Issuer:          req.Issuer,
+		ClientID:        req.ClientID,
+		ClientSecret:    db.EncryptedString(req.ClientSecret),
+		Scopes:          req.Scopes,
+		Enabled:         req.Enabled,
+		GroupsClaim:     req.GroupsClaim,
+		AllowedGroups:   req.AllowedGroups,
+		AdminGroups:     req.AdminGroups,
+		SessionMaxHours: sessionMaxHours,
 	}
 
 	if err := h.oidcRepo.Create(r.Context(), provider); err != nil {
@@ -198,6 +257,7 @@ type updateOIDCRequest struct {
 	ClientSecret string `json:"client_secret"` // optional: empty = keep existing
 	Scopes       string `json:"scopes"`
 	Enabled      bool   `json:"enabled"`
+	oidcAccessFields
 }
 
 // UpdateOIDC handles PUT /api/v1/settings/oidc/{id} (admin only).
@@ -225,6 +285,10 @@ func (h *SettingsHandler) UpdateOIDC(w http.ResponseWriter, r *http.Request) {
 		ErrBadRequest(w, "client_id is required")
 		return
 	}
+	if msg := req.normalize(); msg != "" {
+		ErrBadRequest(w, msg)
+		return
+	}
 
 	if req.Scopes == "" {
 		req.Scopes = "openid email profile"
@@ -246,6 +310,12 @@ func (h *SettingsHandler) UpdateOIDC(w http.ResponseWriter, r *http.Request) {
 	existing.ClientID = req.ClientID
 	existing.Scopes = req.Scopes
 	existing.Enabled = req.Enabled
+	existing.GroupsClaim = req.GroupsClaim
+	existing.AllowedGroups = req.AllowedGroups
+	existing.AdminGroups = req.AdminGroups
+	if req.SessionMaxHours != nil {
+		existing.SessionMaxHours = *req.SessionMaxHours
+	}
 
 	// Only overwrite the stored secret if a new one was provided.
 	if req.ClientSecret != "" {

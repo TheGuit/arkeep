@@ -456,8 +456,8 @@ func (p *OIDCAuthProvider) revokeSessions(ctx context.Context, providerID, sub s
 // allowedGroups is set and the user is in none of them nor in an admin group.
 // role is "admin" or "user" when adminGroups is set, "" otherwise.
 func decideGroups(allowedGroups, adminGroups string, userGroups []string) (allowed bool, role string) {
-	allowedList := splitGroups(allowedGroups)
-	adminList := splitGroups(adminGroups)
+	allowedList := SplitGroups(allowedGroups)
+	adminList := SplitGroups(adminGroups)
 
 	isAdmin := hasAnyGroup(userGroups, adminList)
 	allowed = len(allowedList) == 0 || isAdmin || hasAnyGroup(userGroups, allowedList)
@@ -471,9 +471,9 @@ func decideGroups(allowedGroups, adminGroups string, userGroups []string) (allow
 	return allowed, role
 }
 
-// splitGroups splits a comma-separated list of group names, trimming spaces
+// SplitGroups splits a comma-separated list of group names, trimming spaces
 // around each name and dropping empty entries.
-func splitGroups(s string) []string {
+func SplitGroups(s string) []string {
 	var groups []string
 	for _, g := range strings.Split(s, ",") {
 		if g = strings.TrimSpace(g); g != "" {
