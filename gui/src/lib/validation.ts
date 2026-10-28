@@ -25,6 +25,10 @@ export function isHttpURL(v: string): boolean {
   }
 }
 
+// MAX_RETENTION_KEEP mirrors maxRetentionKeep on the server: the largest
+// keep-last/hourly/daily/weekly/monthly/yearly value of a retention.
+export const MAX_RETENTION_KEEP = 1000
+
 // passwordSchema is the rule for every new local account password.
 export const passwordSchema = z
   .string()

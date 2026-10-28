@@ -242,7 +242,9 @@ const hookFieldSchema = z.object({
   name: z.string().optional(),
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
-  timeout_secs: z.union([z.number(), z.string()]).optional(),
+  // Checked in superRefine. Not a z.union: @vee-validate/zod reads zod 3
+  // union errors and fails on zod 4 ones.
+  timeout_secs: z.unknown(),
 }).superRefine((hook, ctx) => {
   if (!hook.enabled) return
   const result = hookTimeoutSchema.safeParse(hook.timeout_secs)
