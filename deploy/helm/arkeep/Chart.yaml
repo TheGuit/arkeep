@@ -4,8 +4,8 @@ description: Centralized backup management for self-hosted infrastructure
 type: application
 version: 0.1.0
 # Arkeep release deployed by default (image tag). Kept in sync with the latest
-# release by .github/workflows/deps-pins.yml (ADR 0013).
-appVersion: "v0.7.0"
+# release by .github/workflows/deps-pins.yml (ADR 0013), like the compose examples.
+appVersion: "v0.9.1"
 
 keywords:
   - backup
